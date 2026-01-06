@@ -1,0 +1,2 @@
+file(compat.ol i.ol)
+locate( beg text .LITPOOL. : 0 )
