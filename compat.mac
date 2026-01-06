@@ -1,0 +1,8 @@
+	.globl begin
+	.psect beg
+	bsr %26,10$
+	nop
+	.long .LITPOOL.
+10$:	LD %26,%26[1]
+	BRA begin
+	NOP
