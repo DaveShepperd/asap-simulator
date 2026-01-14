@@ -7,34 +7,31 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 #include "asapExecute.h"
-
-/* Status bits:
-   0 - carry
-   1 - overflow
-   2 - zero
-   3 - negative
-   4 - Interrupt enable
-   5 - Previous Interrupt enable
-*/
+#include "lclreadline.h"
+#include "qa.h"
+#include "syscalls.h"
+#include "get_stb.h"
 
 #define CARRY		(1<<0)
 #define OVERFLOW	(1<<1)
 #define ZERO		(1<<2)
 #define NEGATIVE	(1<<3)
+#define IENABLE		(1<<4)
+#define PIENABLE	(1<<5)
+#define BSR_INC		(8)		/* Spec says this should be 4, but real code assumes 8 */
 
-static int chkBranch(Asap_t *asap, int condition)
+static int chkBranch(Asap_t *asap)
 {
-	bool N,Z,V,C;
-	int status = asap->status;
+	bool C,V,Z,N;
+	int status = asap->status, condition=asap->dstReg;
 	
-	C = status&1;
-	status >>= 1;
-	V = status&1;
-	status >>= 1;
-	Z = status&1;
-	status >>= 1;
-	N = status&1;
+	C = (status&CARRY) ? 1 : 0;
+	V = (status&OVERFLOW) ? 1 : 0;
+	Z = (status&ZERO) ? 1 : 0;
+	N = (status&NEGATIVE) ? 1 : 0;
 	switch (condition)
 	{
 	case 0:		/* strictly positive (Z|N) == 0 */
@@ -62,7 +59,7 @@ static int chkBranch(Asap_t *asap, int condition)
 		asap->msg = "BLE";
 		return (!C | Z);
 	case 8:		/* carry clear C == 0*/
-		asap->msg = "BCC";
+		asap->msg = "BLO(BCC)";
 		return !C;
 	case 9:		/* carry set C == 1 */
 		asap->msg = "BCS";
@@ -92,163 +89,1391 @@ static int chkBranch(Asap_t *asap, int condition)
 	return 2;
 }
 
-void asapExecute(Asap_t *asap)
+const char *mkRegName(Asap_t *asap, int num, int reg)
 {
-	int opcode;
-	bool takeBranch;
-	int brTarget, pcInc, brOffset, condition, dstReg, src1Reg, src2;
-	uint32_t instruction;
+	if ( reg == 29 )
+		return ".SP";
+	if ( reg == 28 )
+		return ".RP";
+	if ( reg == 27 )
+		return ".FP";
+	if ( reg == 26 )
+		return ".LP";
+	snprintf(asap->regName[num],sizeof(asap->regName[num]),"%%%d", reg);
+	return asap->regName[num];
+}
+
+char *mkStsTxt(Asap_t *asap, bool flag)
+{
+	if ( flag )
+	{
+		snprintf(asap->stsTxt, sizeof(asap->stsTxt), ", sts %c%c%c%c%c%c, ",
+				(asap->status&PIENABLE)	? 'P': '-',
+				(asap->status&IENABLE)	? 'I': '-',
+				(asap->status&NEGATIVE)	? 'N': '-',
+				(asap->status&OVERFLOW)	? 'V': '-',
+				(asap->status&ZERO)		? 'Z': '-',
+				(asap->status&CARRY)	? 'C': '-'
+				 );
+	}
+	else
+		asap->stsTxt[0] = 0;
+	return asap->stsTxt;
+}
+
+/* Status bits:
+   0 - carry
+   1 - overflow
+   2 - zero
+   3 - negative
+   4 - Interrupt enable
+   5 - Previous Interrupt enable
+*/
+
+typedef struct
+{
+	uint32_t bit;
+	uint32_t mask;
+} BitMask_t;
+static const BitMask_t BitMasks[] =
+{
+	{ 1<<7,  0x000000FF },	/* 0 */
+	{ 1<<15, 0x0000FFFF },	/* 1 */
+	{ (uint32_t)1<<31, (uint32_t)0xFFFFFFFF } /* 2 */
+};
+
+/* shiftCnt is 0, 1 or 2 for byte, short or long */
+static void setStatus(Asap_t *asap, int shiftCnt)
+{
+	bool carry = (asap->bDst & 0x100000000);	// No matter what, bit 32 of result is carry
+	static const uint32_t Bit31 = 1<<31;
 	
-	brTarget = 0;
-	pcInc = 4;
+	asap->status &= ~asap->stsMask;
+	if ( (asap->stsMask & CARRY) && carry )
+		asap->status |= CARRY;
+	if ( (asap->stsMask & OVERFLOW) )
+	{
+				// If both sources were negative and the result was positve, it's an overflow
+		if (   (((asap->bSrc2 & asap->bSrc1) & Bit31) && !carry)
+			   // or if both sources were positive and the result was negative, it's an overflow
+			|| (!((asap->bSrc2 | asap->bSrc1) & Bit31) && carry)
+		   )
+			asap->status |= OVERFLOW;
+	}
+	if ( (asap->stsMask & ZERO) && !(asap->bDst&BitMasks[shiftCnt].mask) )
+		asap->status |= ZERO;
+	if ( (asap->stsMask & NEGATIVE) && (asap->bDst&BitMasks[shiftCnt].bit) )
+		asap->status |= NEGATIVE;
+}
+
+static void getALUargs(Asap_t *asap)
+{
+	asap->bDst = asap->registers[asap->dstReg];
+	asap->bSrc1 = asap->registers[asap->src1Reg];
+	if ( asap->src2 >= 0xFFE0 )
+		asap->bSrc2 = asap->registers[asap->src2-0xFFE0];
+	else
+		asap->bSrc2 = asap->src2;
+	return;
+}
+
+/* shiftCnt is 0, 1 or 2  */
+static uint32_t getLSargs(Asap_t *asap, uint32_t instruction, int shiftCnt)
+{
+	uint32_t ans;
+	int src1, src2, src2IsReg=0;
+	
+	src1 = (instruction>>16)&0x1F;
+	src2 = (instruction&0xFFFF);
+	ans = asap->registers[src1];
+	if ( src2 >= 0xFFE0 )
+	{
+		src2 = asap->registers[src2-0xFFE0];
+		src2IsReg = 1;
+	}
+	ans += src2*(1<<shiftCnt);
+	if ( src1 == 29 || (src2IsReg && src2 == 29) )
+	{
+		if ( ans < asap->memLen || ans > asap->memLen + asap->stackSize )
+		{
+			snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of STACK range of memory %08X-%08X\n",
+					 ans, asap->memLen, asap->memLen + asap->stackSize);
+		}
+	}
+	else if ( ans > asap->memLen + asap->stackSize )
+	{
+		snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", ans, asap->memLen + asap->stackSize);
+	}
+	return ans;
+}
+
+static void commonAluOut(Asap_t *asap, const char *opc, const char *oper )
+{
+	int src2 = asap->src2;
+	if ( asap->affectStatus )
+		setStatus(asap,2);
+	asap->result = asap->bDst & 0xFFFFFFFF;
+	if ( src2 >= 0xFFE0 )
+	{
+		src2 -= 0xFFE0;
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"%s%s %s,%s,%s ; dst gets %08X = %08lX %s %08X%s\n",
+			   opc,
+			   asap->affectStatus ? ".C":"", 
+			   mkRegName(asap, 0, asap->dstReg),
+			   mkRegName(asap, 1, asap->src1Reg),
+			   mkRegName(asap, 2, src2),
+			   asap->result,
+			   asap->bSrc1&0xFFFFFFFF,
+			   oper,
+			   asap->registers[src2],
+			   mkStsTxt(asap,asap->affectStatus)
+			   );
+	}
+	else
+	{
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"%s%s %s,%s,%d (%04X) ; dst gets %08X = %08lX %s %08X%s\n",
+			   opc,
+			   asap->affectStatus ? ".C":"", 
+			   mkRegName(asap, 0, asap->dstReg),
+			   mkRegName(asap, 1, asap->src1Reg),
+			   src2,
+			   src2&0xFFFF,
+			   asap->result,
+			   asap->bSrc1&0xFFFFFFFF,
+			   oper,
+			   src2,
+			   mkStsTxt(asap,asap->affectStatus)
+			   );
+	}
+	if ( asap->dstReg )
+		asap->registers[asap->dstReg] = asap->result;
+}
+
+/* mult is 0, 1 or 2 for byte, short or long */
+/* Finish for LEA and LEAS */
+static int commonLDSOut(Asap_t *asap, int shiftCnt)
+{
+	//                           0  1  2 
+	static const int Numbs[] = { 2, 4, 8 };
+	uint32_t res = asap->result&BitMasks[shiftCnt].mask;
+	const HashEntry_t *he = shiftCnt == 2 ? findHash(asap,res) : NULL;
+	
+	if ( asap->affectStatus )
+		setStatus(asap,shiftCnt);
+	asap->showTextLen += snprintf(
+		asap->showText+asap->showTextLen,
+		sizeof(asap->showText)-asap->showTextLen,
+		"; dst gets %0*X = %08X+%08X%s  %s\n",
+		   Numbs[shiftCnt],
+		   res,
+		   asap->registers[asap->src1Reg],
+		   (asap->src2 >= 0xFFE0 ? asap->registers[asap->src2-0xFFE0]:asap->src2)*(1<<shiftCnt),
+		   mkStsTxt(asap,asap->affectStatus),
+           he ? he->name : ""
+		   );
+	if ( asap->dstReg )
+		asap->registers[asap->dstReg] = asap->result;
+	if ( asap->errorMsg[0] )
+		return 1;
+	return 0;
+}
+
+/* shiftCnt is 0, 1 or 2 for byte, short or long */
+/* Finish for LD, LDS and LDB */
+static int commonLDIndOut(Asap_t *asap, uint32_t memIdx, int shiftCnt)
+{
+	//                           0  1  2 
+	static const int Numbs[] = { 2, 4, 8 };
+	uint32_t res = asap->result&BitMasks[shiftCnt].mask;
+	const HashEntry_t *he = shiftCnt == 2 ? findHash(asap,memIdx) : NULL;
+
+	if ( asap->affectStatus )
+		setStatus(asap,shiftCnt);
+	asap->showTextLen += snprintf(
+		asap->showText+asap->showTextLen,
+		sizeof(asap->showText)-asap->showTextLen,
+		"; dst gets %0*X @%08X=%08X+%08X%s  %s\n",
+		   Numbs[shiftCnt],
+		   res,
+		   memIdx,
+		   asap->registers[asap->src1Reg],
+		   (asap->src2 >= 0xFFE0 ? asap->registers[asap->src2-0xFFE0] : asap->src2)*(1<<shiftCnt),
+		   mkStsTxt(asap,asap->affectStatus),
+		   he ? he->name : ""
+		   );
+	if ( asap->dstReg )
+		asap->registers[asap->dstReg] = asap->result;
+	if ( asap->errorMsg[0] )
+		return 1;
+	return 0;
+}
+
+static int commonSTIndOut(Asap_t *asap, uint32_t memIdx, int shiftCnt)
+{
+	//                           0  1  2
+	static const int Numbs[] = { 2, 4, 8 };
+	uint32_t res = asap->result&BitMasks[shiftCnt].mask;
+	const HashEntry_t *he = shiftCnt == 2 ? findHash(asap,memIdx) : NULL;
+
+	if ( asap->affectStatus )
+		setStatus(asap,shiftCnt);
+	asap->showTextLen += snprintf(
+		asap->showText+asap->showTextLen,
+		sizeof(asap->showText)-asap->showTextLen,
+		"; %0*X -> @%08X=%08X+%08X%s  %s\n",
+		   Numbs[shiftCnt],
+		   res,
+		   memIdx,
+		   asap->registers[asap->src1Reg],
+		   (asap->src2 >= 0xFFE0 ? asap->registers[asap->src2-0xFFE0] : asap->src2)*(1<<shiftCnt),
+		   mkStsTxt(asap,asap->affectStatus),
+		   he ? he->name : ""
+		   );
+	if ( asap->errorMsg[0] )
+		return 1;
+	return 0;
+}
+
+static void mkInstText(Asap_t *asap, uint32_t instruction, const char *opc, int mult)
+{
+	if ( (instruction&0xFFFF) >= 0xFFE0 )
+	{
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"%s%s %s, %s[%s]",
+			opc,
+			asap->affectStatus ? ".C":"",
+			mkRegName(asap,0,asap->dstReg),
+			mkRegName(asap,1, asap->src1Reg),
+			mkRegName(asap,2,(instruction&0xFFFF)-0xFFE0)
+		    );
+	}
+	else
+	{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"%s%s %s, %s[%d (%04X)]",
+				opc,
+				   asap->affectStatus ? ".C":"",
+				   mkRegName(asap,0,asap->dstReg),
+				   mkRegName(asap,1,asap->src1Reg),
+				   (instruction & 0xFFFF) * mult,
+				   (instruction & 0xFFFF)
+				);
+	}
+}
+
+#if 0
+static uint32_t getFileNo(const char *title, Asap_t *asap, int reg)
+{
+	uint32_t ptr;
+	ptr = asap->registers[reg];
+	if ( ptr > asap->memLen + asap->stackSize )
+	{
+		snprintf(asap->errorMsg, sizeof(asap->errorMsg),
+				 "%s pointer of 0x%08X is out of range of 0x00000000-0x%08X",
+				 title, ptr, asap->memLen + asap->stackSize-1 );
+		return 0;
+	}
+	return *(uint32_t *)(asap->mem+ptr);
+}
+#endif
+
+char *getStrPtr(const char *title, Asap_t *asap, int reg)
+{
+	uint32_t ptr;
+	ptr = asap->registers[reg];
+	if ( ptr > asap->memLen + asap->stackSize )
+	{
+		snprintf(asap->errorMsg, sizeof(asap->errorMsg), "%s pointer of 0x%08X is out of range of 0x00000000-0x%08X",
+				 title, ptr, asap->memLen + asap->stackSize-1 );
+		return 0;
+	}
+	return (char *)(asap->mem+ptr);
+}
+
+static int doSyscall(Asap_t *asap, int call)
+{
+	FILE *fp;
+	int len, fno, sts;
+	char *strPtr;
+	
+	asap->showTextLen += snprintf(
+		asap->showText+asap->showTextLen,
+		sizeof(asap->showText)-asap->showTextLen,
+		"SYSCALL %d; %s\n", call, mkStsTxt(asap,true));
+	switch (call)
+	{
+	default:
+	case SYSCALL_EXIT:
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"SYSCALL_EXIT(%d): Terminated.\n", asap->registers[1]);
+		break;
+	case SYSCALL_FFLUSH:
+		fno = asap->registers[1];
+		if ( asap->verbose )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"fflush(%d).\n", fno);
+		}
+		fp = NULL;
+		if ( fno == 1 )
+			fp = stdout;
+		else if ( fno == 2 )
+			fp = stderr;
+		if ( fp )
+		{
+			sts = fflush(fp);
+			asap->registers[1] = sts;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = errno;
+		}
+		else
+		{
+			asap->registers[1] = -1;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = ENXIO;
+		}
+		asap->registers[1] = 0;
+		return 0;
+	case SYSCALL_FPUTS:
+		strPtr = getStrPtr("String",asap,1);
+		fno = asap->registers[2];
+		if ( asap->verbose )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"fputs(%s,%d).\n", strPtr, fno);
+		}
+		fp = NULL;
+		if ( fno == 1 )
+			fp = stdout;
+		else if ( fno == 2 )
+			fp = stderr;
+		if ( fp )
+		{
+			sts = fputs(strPtr, fp);
+			asap->registers[1] = sts;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = errno;
+		}
+		else
+		{
+			asap->registers[1] = -1;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = ENXIO;
+		}
+		return 0;
+	case SYSCALL_FGETS:
+		strPtr = getStrPtr("String",asap,1);
+		len = asap->registers[2];
+		fno = asap->registers[3];
+		if ( asap->verbose )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"fgets(%p,%d,%d).\n", strPtr, len, fno);
+		}
+		if ( fno == 0 )
+		{
+			if ( asap->verbose && asap->showText[0] )
+			{
+				fputs(asap->showText,stdout);
+				if ( asap->showText[strlen(asap->showText)-1] != '\n' )
+					fputs("\n",stdout);
+				asap->showText[0] = 0;
+				asap->showTextLen = 0;
+			}
+			fflush(stdout);
+			if ( !fgets(strPtr,len,stdin) )
+			{
+				asap->registers[1] = 0;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = EOF;
+			}
+		}
+		else
+		{
+			asap->registers[1] = 0;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = ENXIO;
+		}
+		return 0;
+	case SYSCALL_FPUTC:
+		len = asap->registers[1];
+		fno = asap->registers[2];
+		if ( asap->verbose )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"fputc(%02X(%c),%d).\n", len, isprint(len)?len:'.', fno);
+		}
+		fp = NULL;
+		if ( fno == 1 )
+			fp = stdout;
+		else if ( fno == 2 )
+			fp = stderr;
+		if ( fp )
+		{
+			sts = fputc(len,fp);
+			asap->registers[1] = sts;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = errno;
+		}
+		else
+		{
+			asap->registers[1] = -1;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = ENXIO;
+		}
+		return 0;
+	case SYSCALL_FGETC:
+		fno = asap->registers[1];
+		if ( asap->verbose )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"fgetc(%d).\n", fno);
+		}
+		if ( fno == 0 )
+		{
+			sts = fgetc(stdin);
+			asap->registers[1] = sts;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = errno;
+		}
+		else
+		{
+			asap->registers[1] = -1;
+			if ( asap->errnoPtr )
+				*asap->errnoPtr = ENXIO;
+		}
+		return 0;
+	}
+	return 1;
+}
+
+static int executeInstruction(Asap_t *asap)
+{
+	int opcode, reg;
+	int brOffset, condition;
+	uint16_t src2;
+	uint32_t instruction, memIdx;
+	uint32_t *mem; 
+	const HashEntry_t *he;
+	
+	mem = (uint32_t *)(asap->mem+asap->pc);
+	instruction = *mem;
+	opcode = (instruction >> 27)&0x1F;
+	asap->dstReg = (instruction>>22)&0x1F;
+	asap->src1Reg = (instruction>>16)&0x1F;
+	asap->src2 = (instruction&0xFFFF);
+	asap->result = 0;
+	asap->affectStatus = (instruction&(1<<21)) ? true : false;
+	asap->errorMsg[0] = 0;
+	if ( asap->numHashes )
+	{
+		char header[36];
+		header[0] = 0;
+		he = findHash(asap,asap->pc);
+		if ( he )
+			snprintf(header,sizeof(header),"%s:",he->name);
+		asap->showTextLen = snprintf(
+					asap->showText,
+					sizeof(asap->showText),
+					"%-*.*s %08X: %08X - ",
+					asap->longestName,
+					asap->longestName,
+					header,
+					asap->pc,
+					instruction);
+	}
+	else
+	{
+		asap->showTextLen = snprintf(
+					asap->showText,
+					sizeof(asap->showText),
+					"%08X: %08X - ",
+					asap->pc,
+					instruction);
+	}
+	if ( asap->brTarget )
+	{
+		asap->pc = asap->brTarget;
+		asap->brTarget = 0;
+		asap->pcInc = 0;
+	}
+	switch (opcode)
+	{
+	default:
+	case 0:
+	case 0x1F:
+		asap->registers[30] = asap->pc;
+		asap->registers[31] = asap->pc+4;
+		asap->status = ((asap->status&IENABLE)<<1) | (asap->status&0xF);
+		src2 = (instruction&0xFFFF);
+		reg = 0;
+		if ( (src2 >= 0xFFE0) )
+		{
+			reg = src2 - 0xFFE0;
+			src2 = 0;
+		}
+		else if ( src2 < 1 || src2 > 255 )
+			src2 = 0;
+		if (    !opcode
+			 || (instruction > 0xF800FFE5)
+			 || (!reg && !src2)
+			 || reg > 5
+		   )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"Illegal opcode. Terminated.\n");
+			return 1;
+		}
+		if ( reg )
+			reg = asap->registers[reg];
+		else
+			reg = src2;
+		if ( doSyscall(asap, reg) )
+			return 1;
+		break;
+	case 1:
+		/* branch? */
+		condition = chkBranch(asap);
+		if ( condition == 2 )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"%s. Terminated.", asap->msg);
+			return 1;
+		}
+		brOffset = instruction & ((1 << 22) - 1);
+		if ( (brOffset&(1<<21)) )
+			brOffset |= 0xFFC00000;
+		brOffset *= 4;
+		asap->affectStatus = 1;	/* allow it to show status */
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"%s %+d (%06X) ;%s branch to %08X, %s\n",
+			   asap->msg,
+			   brOffset,
+			   instruction&0x3FFFFF,
+			   mkStsTxt(asap,asap->affectStatus),
+			   asap->pc+brOffset,
+			   condition ? " Taken":" Not taken");
+		if ( condition )
+		{
+			if ( (asap->pc + brOffset < 0 || asap->pc + brOffset > asap->memLen) )
+			{
+				printf("%s\nWould have branched to %08X which is out of memory range %08X. Terminated.\n",
+					   asap->showText,
+					   asap->pc + brOffset, asap->memLen);
+				asap->showText[0] = 0;
+				asap->showTextLen = 0;
+				return 1;
+			}
+			asap->brTarget = asap->pc+brOffset;
+		}
+		break;
+	case 2:
+		/* BSR and BRA */
+		brOffset = instruction & ((1 << 22) - 1);
+		if ( (brOffset&(1<<21)) )
+			brOffset |= 0xFFC00000;
+		brOffset *= 4;
+		asap->brTarget = asap->pc+brOffset;
+		he = findHash(asap,asap->brTarget);
+		if ( asap->dstReg == 0 )
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"BRA %+d (%06X) (branch to %08X)  %s\n",
+				brOffset,
+				instruction&0x3FFFFF,
+				asap->brTarget,
+				he ? he->name:"");
+		}
+		else
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"BSR %s,%+d (%06X) ; dst gets %08X, branch to %08X  %s\n",
+				   mkRegName(asap,0,asap->dstReg),
+				   brOffset,
+				   instruction&0x3FFFFF,
+				   asap->pc + BSR_INC,
+				   asap->brTarget,
+				   he ? he->name : "");
+			asap->registers[asap->dstReg] = asap->pc+BSR_INC;
+		}
+		if ( (asap->pc+brOffset < 0 || asap->pc+brOffset > asap->memLen)  )
+		{
+			printf("%s\nWould have branched to %08X which is out of memory range %08X. Terminated.\n",
+				   asap->showText,
+				   asap->pc + brOffset, asap->memLen);
+			asap->showText[0] = 0;
+			asap->showTextLen = 0;
+			return 1;
+		}
+		break;
+	case 3:
+		asap->stsMask = NEGATIVE|ZERO;
+		asap->result = getLSargs(asap,instruction,2);
+		mkInstText(asap,instruction,"LEA",4);
+		if ( commonLDSOut(asap,2) )
+			return 1;
+		break;
+	case 4:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,1);
+		mkInstText(asap,instruction,"LEAS",2);
+		if ( commonLDSOut(asap,1) )
+			return 1;
+		break;
+	case 5:
+		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bSrc1 = ((~asap->bSrc1)&0xFFFFFFFF) + 1;	/* 2's compliment lower 32 bits */
+		asap->bDst = asap->bSrc2+asap->bSrc1; /* so overflow and carry bit set properly */
+		if ( asap->affectStatus )
+			setStatus(asap,2);
+		asap->result = asap->bDst & 0xFFFFFFFF;
+		if ( asap->src2 >= 0xFFE0 )
+		{
+			asap->src2 -= 0xFFE0;
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"SUBR%s %s,%s,%s ; dst gets %08X <- %08X-%08X%s\n",
+				   asap->affectStatus ? ".C":"",
+				   mkRegName(asap,0,asap->dstReg),
+				   mkRegName(asap,1,asap->src1Reg),
+				   mkRegName(asap,2,asap->src2),
+				   asap->result,
+				   asap->registers[asap->src2],
+				   asap->registers[asap->src1Reg],
+				   mkStsTxt(asap,asap->affectStatus)
+				   );
+		}
+		else
+		{
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+				"SUBR%s %s,%s,%d (%X) ; dst gets %08X <- %08X-%08X%s\n",
+				   asap->affectStatus ? ".C":"", 
+				   mkRegName(asap,0,asap->dstReg),
+				   mkRegName(asap,1,asap->src1Reg),
+				   asap->src2,
+				   asap->src2,
+				   asap->result,
+				   asap->src2,
+				   asap->registers[asap->src1Reg],
+				   mkStsTxt(asap,asap->affectStatus)
+				   );
+		}
+		if (asap->dstReg )
+			asap->registers[asap->dstReg] = asap->result;
+		break;
+	case 6:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1^asap->bSrc2;
+		commonAluOut(asap,"XOR","^");
+		break;
+	case 7:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1^~asap->bSrc2;
+		commonAluOut(asap,"XORN","^~");
+		break;
+	case 8:
+		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1+asap->bSrc2;
+		commonAluOut(asap,"ADD","+");
+		break;
+	case 9:
+		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+1; /* 2's compliment lower 32 bits so overflow and carry work */
+		asap->bDst = asap->bSrc1+asap->bSrc2;
+		commonAluOut(asap,"SUB","-");
+		break;
+	case 0x0A:
+		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1+asap->bSrc2+(asap->status&CARRY);
+		commonAluOut(asap,"ADDC","+");
+		break;
+	case 0x0B:
+		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+1+(asap->status&CARRY); /* so overflow check works */
+		asap->bDst = asap->bSrc1+asap->bSrc2;
+		commonAluOut(asap,"SUBC","-");
+		break;
+	case 0x0C:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1&asap->bSrc2;
+		commonAluOut(asap,"AND","&");
+		break;
+	case 0x0D:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1&~asap->bSrc2;
+		commonAluOut(asap,"ANDN","&~");
+		break;
+	case 0x0E:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1|asap->bSrc2;
+		commonAluOut(asap,"OR","|");
+		break;
+	case 0x0F:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1|asap->bSrc2;
+		commonAluOut(asap,"ORN","|~");
+		break;
+	case 0x10:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,2);
+		mkInstText(asap,instruction,"LD",4);
+		asap->bDst = *(uint32_t *)(asap->mem + memIdx);
+		asap->result = asap->bDst;
+		if ( commonLDIndOut(asap,memIdx,2) )
+			return 1;
+		break;
+	case 0x11:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,1);
+		mkInstText(asap,instruction,"LDS",2);
+		asap->bDst = *(int16_t *)(asap->mem + memIdx);
+		asap->result = asap->bDst;
+		if (commonLDIndOut(asap,memIdx,1))
+			return 1;
+		break;
+	case 0x12:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,1);
+		mkInstText(asap,instruction,"LDUS",2);
+		asap->bDst = *(uint16_t *)(asap->mem + memIdx);
+		asap->result = asap->bDst;
+		if ( commonLDIndOut(asap,memIdx,1) )
+			return 1;
+		break;
+	case 0x13:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,1);
+		mkInstText(asap,instruction,"STS",2);
+		asap->result = asap->registers[asap->dstReg];
+		asap->bDst = asap->result;
+		if ( !asap->errorMsg[0] )
+			*(uint16_t *)(asap->mem + memIdx) = asap->result;
+		if ( commonSTIndOut(asap,memIdx,1) )
+			return 1;
+		break;
+	case 0x14:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,2);
+		mkInstText(asap,instruction,"ST",4);
+		asap->result = asap->registers[asap->dstReg];
+		asap->bDst = asap->result;
+		if ( !asap->errorMsg[0] )
+			*(uint32_t *)(asap->mem + memIdx) = asap->result;
+		if (commonSTIndOut(asap,memIdx,2))
+			return 1;
+		break;
+	case 0x15:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,0);
+		mkInstText(asap,instruction,"LDB",1);
+		asap->bDst = (int8_t)asap->mem[memIdx];
+		asap->result = asap->bDst;
+		if (commonLDIndOut(asap,memIdx,0))
+			return 1;
+		break;
+	case 0x16:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,0);
+		mkInstText(asap,instruction,"LDUB",1);
+		asap->bDst = asap->mem[memIdx];
+		asap->result = asap->bDst;
+		if (commonLDIndOut(asap,memIdx,0))
+			return 1;
+		break;
+	case 0x17:
+		asap->stsMask = NEGATIVE|ZERO;
+		memIdx = getLSargs(asap,instruction,0);
+		mkInstText(asap,instruction,"STB",1);
+		asap->bDst = asap->registers[asap->dstReg]&0xFF;
+		asap->result = asap->bDst;
+		if ( !asap->errorMsg[0] )
+			asap->mem[memIdx] = asap->result;
+		if (commonSTIndOut(asap,memIdx,0))
+			return 1;
+		break;
+	case 0x18:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1 >> asap->bSrc2;
+		commonAluOut(asap,"ASHR",">>");
+		break;
+	case 0x19:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1 >> asap->bSrc2;
+		commonAluOut(asap,"LSHR",">>");
+		break;
+	case 0x1A:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1 << asap->bSrc2;
+		commonAluOut(asap,"SHL","<<");
+		break;
+	case 0x1B:
+		asap->stsMask = NEGATIVE|ZERO;
+		getALUargs(asap);
+		asap->bDst = asap->bSrc1 << asap->bSrc2;
+		asap->bDst |= asap->bDst>>32;
+		commonAluOut(asap,"ROTL","<<");
+		break;
+	case 0x1C:
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"GETPS %s  ; dst gets %02X%s\n",
+			mkRegName(asap,0,asap->dstReg),
+			asap->status&0x3F,
+			mkStsTxt(asap,true));
+		if ( asap->dstReg )
+			asap->registers[asap->dstReg] = asap->status;
+		break;
+	case 0x1D:
+		if ( asap->src2 >= 0xFFE0 )
+		{
+			asap->status = asap->registers[asap->src2-0xFFE0]&0x3F;
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+			    "PUTPS %s  ; PS gets %02X%s",
+				mkRegName(asap,0,asap->dstReg),
+				asap->status,
+				mkStsTxt(asap,true));
+		}
+		else
+		{
+			asap->status = asap->src2&0x3F;
+			asap->showTextLen += snprintf(
+				asap->showText+asap->showTextLen,
+				sizeof(asap->showText)-asap->showTextLen,
+			    "PUTPS %d    ; PS gets %02X%s\n",
+				asap->src2,
+				asap->src2&0x3F,
+				mkStsTxt(asap,true));
+		}
+		break;
+	case 0x1E:
+		memIdx = getLSargs(asap,instruction,0);
+		mkInstText(asap,instruction,"JSR",4);
+		if ( asap->dstReg )
+			asap->registers[asap->dstReg] = asap->pc+BSR_INC;
+		asap->brTarget = memIdx;
+		if ( asap->affectStatus )
+			asap->status = ((asap->status&PIENABLE)>>1) | (asap->status&0x2F);
+		he = findHash(asap,memIdx);
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"; dst gets %08X, jump to %08X%s  %s\n",
+			   asap->pc+BSR_INC,
+			   memIdx,
+			   mkStsTxt(asap,asap->affectStatus),
+			   he ? he->name : ""
+			   );
+		if ( asap->errorMsg[0] )
+			return 1;
+		break;
+	}
+	asap->pc += asap->pcInc;
+	asap->pcInc = 4;
+	return 0;
+}
+
+static void dumpRegs(Asap_t *asap)
+{
+	uint32_t ii;
+	const uint32_t *ptr;
+
+	ptr = asap->registers;
+	printf("pc = %08X%smemLen = %d, stackSize=%d.\n", asap->pc, mkStsTxt(asap,true), asap->memLen, asap->stackSize);
+	for ( ii = 0; ii < 32; ++ii, ++ptr )
+	{
+		if ( !(ii & 7) )
+			printf("%sreg %2d:", ii ? "\n" : "", ii);
+		printf("  %08X", *ptr);
+	}
+	printf("\n");
+}
+
+static char *dmpAscii(char *dst, int columns, const uint8_t *rcd, int bytes)
+{
+	int ii;
+	*dst++ = ' ';
+	*dst++ = ' ';
+	*dst++ = '|';
+	for (ii=0; ii < bytes; ++ii)
+	{
+		*dst++ = isprint(*rcd) ? *rcd : '.';
+		++rcd;
+	}
+	if ( ii < columns )
+	{
+		int jj;
+		for (jj=ii; jj < columns; ++jj)
+		{
+			*dst++ = ' ';
+		}
+	}
+	*dst++ = '|';
+	*dst = 0;
+	return dst;
+}
+
+static int hexDump(Asap_t *asap, uint32_t addr, uint32_t cnt)
+{
+	int len=0, items, banner;
+	char *dst;
+	char line[256];
+	uint8_t *rcd, *linePtr;
+	uint32_t ii, *rcd32;
+	static const int Bytes=32;
+	static const int MaxItems=8;
+	
+	items = 0;
+	banner = 1;
+	addr = addr & -4;
+	cnt = cnt & -4;
+	if ( cnt > asap->memLen )
+		cnt = asap->memLen;
+	if ( cnt > addr + asap->memLen )
+		cnt = asap->memLen-addr;
+	rcd = asap->mem + addr;
+	linePtr = rcd;
+	dst = line;
+	for ( ii = 0; ii < cnt; )
+	{
+		if ( items >= MaxItems )
+		{
+			dmpAscii(dst, Bytes, linePtr, Bytes );
+			banner = 1;
+			dst = line;
+		}
+		if ( banner )
+		{
+			if ( ii )
+			{
+				printf("%s\n", line);
+				memset(line,' ',sizeof(line)-1);
+			}
+			len = snprintf(line,sizeof(line),"%08X: ", addr);
+			dst = line+len;
+			addr += Bytes;
+			banner = 0;
+			items = 0;
+			linePtr = rcd;
+		}
+		if ( items && !(items&3) )
+			*dst++ = ' ';
+		rcd32 = (uint32_t *)(rcd);
+		dst += snprintf(dst, 10, " %08X", *rcd32);
+		++items;
+		rcd += 4;
+		ii += 4;
+	}
+	if ( items && items <= MaxItems)
+	{
+		if ( cnt >= Bytes )
+		{
+			int jj;
+			for (jj=items; jj < MaxItems; ++jj)
+			{
+				if ( jj && !(jj&3) )
+					*dst++ = ' ';
+				memset(dst,' ',10);
+				dst += 9;
+			}
+		}
+		dmpAscii(dst, Bytes, linePtr, items*4);
+	}
+	printf("%s\n", line);
+	return 0;
+}
+
+typedef enum
+{
+	Nothing,
+	Step,
+	Memory,
+	Registers,
+	Verbose,
+	Help,
+	Continue,
+	Run,
+	Quit,
+	Breakpoint
+} Cmds_t;
+
+void simulateAsap(Asap_t *asap)
+{
+	asap->brTarget = 0;
+	asap->pcInc = 4;
+	Cmds_t lastCmd=Nothing;
+	uint32_t memFrom=0;
+	int memLen=0, args;
+	
+	if ( !asap->interactive && asap->verbose )
+	{
+		printf("Before execution:\n");
+		dumpRegs(asap);
+		printf("\n");
+	}
 	while ( 1 )
 	{
-		uint32_t *mem = (uint32_t *)(asap->mem+asap->pc);
-		instruction = *mem;
-		opcode = (instruction >> 27)&0x1F;
-		printf("%08X: %08X - ", asap->pc, instruction);
-		if ( brTarget )
+		if ( asap->interactive )
 		{
-			asap->pc = brTarget;
-			brTarget = 0;
-			pcInc = 0;
-		}
-		switch (opcode)
-		{
-		default:
-		case 0:
-		case 0x1F:
-			printf("Illegal opcode. Terminated.\n");
-			return;
-		case 1:
-			/* branch? */
-			condition = (instruction>>22)&0x1F;
-			condition = chkBranch(asap,condition);
-			if ( condition == 2 )
+			char ttybuf[128], token[sizeof(ttybuf)+1];
+			char *ttp;
+			ttp = ttybuf;
+			if ( qa5(stdin, stdout, "asap-sim> ", sizeof(ttybuf), ttybuf) )
 			{
-				printf("%s. Terminated.\n", asap->msg);
-				return;
-			}
-			brOffset = instruction & ((1 << 22) - 1);
-			if ( (brOffset&(1<<21)) )
-				brOffset |= 0xFFC00000;
-			brOffset *= 4;
-			printf("%s %+d (target=%08X)%s\n", asap->msg, brOffset, asap->pc+brOffset, condition ? " Taken":" Not taken");
-			if ( condition )
-			{
-				if ( (asap->pc+brOffset < 0 || asap->pc+brOffset > (int)sizeof(asap->mem))  )
+				switch (_qaval_)
 				{
-					printf("Would have branched out of range. Terminated.\n");
+				case EOF:
+					printf("\n");
 					return;
-				}
-				brTarget = asap->pc+brOffset;
+	
+				case EOF - 1:
+					fprintf(stderr, "\nI/O error; command ignored\n\n");
+					purge_qa2(stdin, stdout);
+					lastCmd = Nothing;
+					memFrom = 0;
+					memLen = 0;
+					continue;
+
+				case 1:
+					break;
+					
+				default:
+					fprintf(stderr, "\nUnhandled qa5() return: %d; command ignored\n\n", _qaval_);
+					purge_qa2(stdin, stdout);
+					lastCmd = Nothing;
+					memFrom = 0;
+					memLen = 0;
+					continue;
+				};
 			}
-			break;
-		case 2:
-			/* BSR and BRA */
-			dstReg = (instruction>>22)&0x1F;
-			brOffset = instruction & ((1 << 22) - 1);
-			if ( (brOffset&(1<<21)) )
-				brOffset |= 0xFFC00000;
-			brOffset *= 4;
-			brTarget = asap->pc+brOffset;
-			if ( dstReg == 0 )
-				printf("BRA %+d (target=%08X)\n", brOffset, brTarget);
-			else
-				printf("BSR %%%d,%+d (target=%08X)\n", dstReg, brOffset, brTarget);
-			if ( (asap->pc+brOffset < 0 || asap->pc+brOffset > (int)sizeof(asap->mem))  )
+	
+			while ( isspace(*ttp) )
+				++ttp;
+			if ( !*ttp || *ttp == '!' || *ttp == ';' || *ttp == '#' || *ttp == '\n')
 			{
-				printf("Would have branched out of range. Terminated.\n");
+				switch (lastCmd)
+				{
+				default:
+					lastCmd = Nothing;
+					memFrom = 0;
+					memLen = 0;
+					continue; /* blank line */
+				case Breakpoint:
+					lastCmd = Nothing;
+					memFrom = 0;
+					memLen = 0;
+					continue;
+				case Quit:
+					strncpy(ttybuf, "quit", sizeof(ttybuf));
+					break;
+				case Step:
+					strncpy(ttybuf, "step", sizeof(ttybuf));
+					break;
+				case Memory:
+					memFrom += memLen;
+					snprintf(ttybuf, sizeof(ttybuf), "memory %X %X", memFrom, memLen);
+					break;
+				case Registers:
+					strncpy(ttybuf, "registers", sizeof(ttybuf));
+					break;
+				case Verbose:
+					strncpy(ttybuf, "verbose", sizeof(ttybuf));
+					break;
+				case Help:
+					strncpy(ttybuf, "Help", sizeof(ttybuf));
+					break;
+				case Continue:
+					strncpy(ttybuf, "continue", sizeof(ttybuf));
+					break;
+				case Run:
+					strncpy(ttybuf, "run", sizeof(ttybuf));
+					break;
+				}
+			}
+			token[0] = 0;
+			if ( (args=sscanf(ttp, "%127s", token)) != 1 )
+			{
+				fprintf(stderr, "Invalid characters;  unrecognized command. args=%d, token='%s'\n", args, token);
+				continue;
+			}
+			if ( !strncasecmp(token,"step",strlen(token)) )
+			{
+				lastCmd = Step;
+				if ( !asap->cannotContinue )
+				{
+					if ( asap->breakPointSet && asap->pc == asap->breakPoint )
+					{
+						const HashEntry_t *he = findHash(asap,asap->breakPoint);
+						printf("Hit breakpoint at %08X", asap->breakPoint);
+						if ( he )
+							printf(": %s", he->name);
+						printf("\nBefore execution:\n");
+						dumpRegs(asap);
+						printf("Executing instruction at breakpoint address\n");
+					}
+					asap->cannotContinue = executeInstruction(asap);
+					if ( asap->cannotContinue || asap->verbose )
+					{
+						if ( asap->showText[0] )
+						{
+							fputs(asap->showText,stdout);
+							if ( !strchr(asap->showText,'\n') )
+								fputs("\n",stdout);
+						}
+					}
+					if ( asap->errorMsg[0] )
+					{
+						fputs(asap->errorMsg,stdout);
+						if ( !strchr(asap->errorMsg,'\n') )
+							fputs("\n",stdout);
+					}
+				}
+				else
+					lastCmd = Nothing;
+				continue;
+			}
+			if ( !strncasecmp(token,"breakpoint",strlen(token)) || !strncasecmp(token,"bp",strlen(token)))
+			{
+				const HashEntry_t *he;
+				char *endp;
+				
+				lastCmd = Breakpoint;
+				endp = ttybuf+strlen(token);
+				while ( isspace(*endp) )
+					++endp;
+				if ( *endp )
+				{
+					asap->breakPointSet = false;
+					asap->breakPoint = 0;
+					token[0] = 0;
+					if ( (args=sscanf(endp, "%127s", token)) != 1 )
+					{
+						fprintf(stderr, "Invalid characters;  unrecognized argument to breakpoint command. args=%d, token='%s'\n", args, token);
+						continue;
+					}
+					endp = NULL;
+					asap->breakPoint = strtoul(token, &endp, 16);
+					if ( !endp || *endp )
+					{
+						if ( !asap->numUsedHashes )
+						{
+							printf("No symbols available. Can't set bp to '%s'\n", token);
+							continue;
+						}
+						he = findHashByName(asap, token);
+						if ( !he )
+						{
+							printf("No such symbol as '%s'\n", token);
+							continue;
+						}
+						asap->breakPoint = he->value;
+						printf("Breakpoint set at %s: 0x%08X\n", he->name, he->value);
+					}
+					else
+					{
+						if ( asap->breakPoint > asap->memLen )
+						{
+							fprintf(stderr, "Breakpoint value 0x%08X out of memory limits 0x%08X\n",
+									asap->breakPoint, asap->memLen);
+							continue;
+						}
+						printf("Breakpoint set at 0x%08X\n", asap->breakPoint);
+					}
+					asap->breakPointSet = true;
+				}
+				else
+				{
+					if ( asap->breakPointSet )
+					{
+						he = findHash(asap,asap->breakPoint);
+						printf("Breakpoint set at %08X", asap->breakPoint);
+						if ( he )
+							printf(": %s", he->name);
+						printf("\n");
+					}
+					else
+						printf("No breakpoint set\n");
+				}
+				continue;
+			}
+			if ( !strncasecmp(token,"registers",strlen(token)) )
+			{
+				lastCmd = Registers;
+				dumpRegs(asap);
+				continue;
+			}
+			if ( !strncasecmp(token,"memory",strlen(token)) )
+			{
+				lastCmd = Memory;
+				ttp += strlen(token);
+				args = sscanf(ttp,"%x %x",&memFrom,&memLen);
+				if ( !args )
+				{
+					memFrom = 0;
+					memLen = asap->memLen;
+				}
+				else if ( args == 1 )
+				{
+					memLen = asap->memLen + asap->stackSize - memFrom;
+				}
+				else if ( args != 2 )
+				{
+					fprintf(stderr,"Bad from and/or to parameters\n");
+					memFrom = 0;
+					memLen = 0;
+					lastCmd = Nothing;
+					continue;
+				}
+				memFrom = (memFrom+3) & -4;
+				memLen = (memLen+3) & -4;
+				if ( memLen > 0 )
+				{
+					hexDump(asap,memFrom,memLen);
+/*					dumpMem(asap, memFrom, memLen); */
+				}
+				continue;
+			}
+			if ( !strncasecmp(token,"verbose",strlen(token)) )
+			{
+				lastCmd = Verbose;
+				asap->verbose = !asap->verbose;
+				printf("Verbose turned %s\n", asap->verbose ? "ON":"OFF");
+				continue;
+			}
+			if ( !strncasecmp(token,"help",strlen(token)) )
+			{
+				lastCmd = Help;
+				printf("Commands are:\n"
+					   "(Commands can be abbreviated to 1 or more characters)\n"
+					   "breakpoint n - set breakpoint at 'n' (expected to be hex)\n"
+					   "             - 'n' could also be a symbol if available\n"
+					   "bp        - same as breakpoint"
+					   "continue  - continue execution. Have to ^C to stop and exit.\n"
+					   "exit      - exit\n"
+					   "memory [start [nBytes]] - display memory.\n"
+					   "            optional start address\n"
+					   "            followed by optional byte count\n"
+					   "            Default start is 0 and count is all of memory\n"
+					   "            start and nBytes are expected to be in hex\n"
+					   "quit      - exit\n"
+					   "registers - show registers\n"
+					   "run       - continue execution. Have to ^C to stop and exit.\n"
+					   "step      - execute one instruction\n"
+					   "verbose   - toggle verbose mode\n"
+					   );
+					   
+				if ( !asap->cannotContinue )
+					asap->interactive = 0;
+				continue;
+			}
+			if ( !strncasecmp(token,"continue",strlen(token)) || !strncasecmp(token,"run",strlen(token)) )
+			{
+				lastCmd = Continue;
+				if ( !asap->cannotContinue )
+					asap->interactive = 0;
+				else
+				{
+					printf("Due to error condition, cannot continue\n");
+					lastCmd = Nothing;
+				}
+				continue;
+			}
+			if ( !strncasecmp(token,"quit",strlen(token)) || !strncasecmp(token,"exit",strlen(token)) )
+			{
+				lastCmd = Quit;
 				return;
 			}
-			break;
-		case 3:
-			printf("LEA\n");
-			break;
-		case 4:
-			printf("LEAS\n");
-			break;
-		case 5:
-			printf("SUBR\n");
-			break;
-		case 6:
-			printf("XOR\n");
-			break;
-		case 7:
-			printf("XORN\n");
-			break;
-		case 8:
-			printf("ADD\n");
-			break;
-		case 9:
-			printf("SUB\n");
-			break;
-		case 0x0A:
-			printf("ADDC\n");
-			break;
-		case 0x0B:
-			printf("SUBC\n");
-			break;
-		case 0x0C:
-			printf("AND\n");
-			break;
-		case 0x0D:
-			printf("ANDN\n");
-			break;
-		case 0x0E:
-			printf("OR\n");
-			break;
-		case 0x0F:
-			printf("ORN\n");
-			break;
-		case 0x10:
-			printf("LD\n");
-			break;
-		case 0x11:
-			printf("LDS\n");
-			break;
-		case 0x12:
-			printf("LDUS\n");
-			break;
-		case 0x13:
-			printf("STS\n");
-			break;
-		case 0x14:
-			printf("ST\n");
-			break;
-		case 0x15:
-			printf("LDB\n");
-			break;
-		case 0x16:
-			printf("LDUB\n");
-			break;
-		case 0x17:
-			printf("STB\n");
-			break;
-		case 0x18:
-			printf("ASHR\n");
-			break;
-		case 0x19:
-			printf("LSHR\n");
-			break;
-		case 0x1A:
-			printf("SHL\n");
-			break;
-		case 0x1B:
-			printf("ROTL\n");
-			break;
-		case 0x1C:
-			printf("GETPS\n");
-			break;
-		case 0x1D:
-			printf("PUTPS\n");
-			break;
-		case 0x1E:
-			printf("JSR\n");
-			break;
+			fprintf(stderr,"Unrecognized command\n");
+			continue;
 		}
-		asap->pc += pcInc;
-		pcInc = 4;
+		if ( asap->breakPointSet && asap->pc == asap->breakPoint )
+		{
+			const HashEntry_t *he = findHash(asap,asap->breakPoint);
+			printf("Hit breakpoint at %08X", asap->breakPoint);
+			if ( he )
+				printf(": %s", he->name);
+			printf("\nBefore execution:\n");
+			dumpRegs(asap);
+			asap->interactive = true;
+			continue;
+		}
+		asap->cannotContinue = executeInstruction(asap);
+		if ( asap->cannotContinue || asap->verbose || asap->errorMsg[0] )
+		{
+			if ( asap->showText[0] )
+			{
+				fputs(asap->showText,stdout);
+				if ( !strchr(asap->showText,'\n') )
+					fputs("\n",stdout);
+			}
+			if ( asap->errorMsg[0] )
+			{
+				fputs(asap->errorMsg,stdout);
+				if ( !strchr(asap->errorMsg,'\n') )
+					fputs("\n",stdout);
+			}
+		}
+		if ( asap->cannotContinue )
+		{
+			if ( asap->verbose )
+			{
+				printf("After execution (%d bytes):\n", asap->memLen);
+				dumpRegs(asap);
+				printf("\n");
+			}
+			return;
+		}
 	}
 }
 

@@ -1,0 +1,16 @@
+	.list	
+	.macro call name, value
+	.outfile 0
+	.globl name
+name = value
+	.outfile 1
+#define name value
+	.endm
+
+call SYSCALL_EXIT	1
+call SYSCALL_FFLUSH	2
+call SYSCALL_FPUTS	3
+call SYSCALL_FGETS	4
+call SYSCALL_FPUTC	5
+call SYSCALL_FGETC	6
+call SYSCALL_READLINE	7

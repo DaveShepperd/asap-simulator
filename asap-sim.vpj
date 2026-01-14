@@ -11,7 +11,8 @@
 		DebugCallbackName="gdb"
 		Version="1"
 		OutputFile="%bdasap-sim"
-		CompilerConfigName="Latest Version">
+		CompilerConfigName="Latest Version"
+		Defines='"/DUSE_READLINE" "/DALIGNMENT=0"'>
 		<Menu>
 			<Target
 				Name="Compile"
@@ -22,7 +23,7 @@
 				OutputExts="*.o"
 				SaveOption="SaveCurrent"
 				RunFromDir="%rw">
-				<Exec CmdLine='g++ -c %xup  %defd -g -o "%bd%n%oe" %i "%f"'/>
+				<Exec CmdLine='g++ -c %xup %defd -g -ggdb -Wall -Werror -o "%bd%n%oe" %i %f'/>
 			</Target>
 			<Target
 				Name="Link"
@@ -33,7 +34,9 @@
 				Deletable="0"
 				SaveOption="SaveCurrent"
 				RunFromDir="%rw">
-				<Exec CmdLine='g++ %xup -g -o "%o" %f %libs'/>
+				<Exec
+					CmdLine='g++ %xup -g -ggdb -Wall -Werror %~other -o "%o" %objs'
+					OtherOptions="-g"/>
 			</Target>
 			<Target
 				Name="Build"
@@ -131,6 +134,10 @@
 				Name="LinkerOutputType"
 				Value="Executable"/>
 		</List>
+		<Includes/>
+		<Libs PreObjects="0">
+			<Lib File="-lreadline"/>
+		</Libs>
 	</Config>
 	<Config
 		Name="Release"
@@ -138,7 +145,8 @@
 		DebugCallbackName="gdb"
 		Version="1"
 		OutputFile="%bdasap-sim"
-		CompilerConfigName="Latest Version">
+		CompilerConfigName="Latest Version"
+		Defines="">
 		<Menu>
 			<Target
 				Name="Compile"
@@ -149,7 +157,7 @@
 				OutputExts="*.o"
 				SaveOption="SaveCurrent"
 				RunFromDir="%rw">
-				<Exec CmdLine='g++ -c %xup %defd -o "%bd%n%oe" %i "%f"'/>
+				<Exec CmdLine='g++ -c %xup %defd -o "%bd%n%oe" %i %f'/>
 			</Target>
 			<Target
 				Name="Link"
@@ -160,7 +168,7 @@
 				Deletable="0"
 				SaveOption="SaveCurrent"
 				RunFromDir="%rw">
-				<Exec CmdLine='g++ %xup -o "%o" %f %libs'/>
+				<Exec CmdLine='g++ %xup -o "%o" %objs'/>
 			</Target>
 			<Target
 				Name="Build"
@@ -258,6 +266,8 @@
 				Name="LinkerOutputType"
 				Value="Executable"/>
 		</List>
+		<Includes/>
+		<Libs PreObjects="0"/>
 	</Config>
 	<Files>
 		<Folder
@@ -265,13 +275,23 @@
 			Filters="*.c;*.C;*.cc;*.cpp;*.cp;*.cxx;*.c++;*.prg;*.pas;*.dpr;*.asm;*.s;*.bas;*.java;*.cs;*.sc;*.scala;*.e;*.cob;*.html;*.rc;*.tcl;*.py;*.pl;*.d;*.m;*.mm;*.go;*.groovy;*.gsh"
 			GUID="{86EC3DA7-D08A-41F3-ACC6-323E6AFD279D}">
 			<F N="asapExecute.cpp"/>
+			<F N="get_stb.c"/>
+			<F N="lclreadline.c"/>
 			<F N="main.cpp"/>
+			<F N="qa.c"/>
 		</Folder>
 		<Folder
 			Name="Header Files"
 			Filters="*.h;*.H;*.hh;*.hpp;*.hxx;*.h++;*.inc;*.sh;*.cpy;*.if"
 			GUID="{2D0FEE9C-7665-4DC5-81D1-56DCBFBA92E9}">
 			<F N="asapExecute.h"/>
+			<F N="formats.h"/>
+			<F N="get_stb.h"/>
+			<F N="lclreadline.h"/>
+			<F N="qa.h"/>
+			<F N="segdef.h"/>
+			<F N="syscalls.h"/>
+			<F N="vlda_structs.h"/>
 		</Folder>
 		<Folder
 			Name="Resource Files"
