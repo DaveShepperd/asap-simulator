@@ -1,0 +1,151 @@
+	.radix	10.
+; Registers
+.LP  = %26		; user literal pool pointer
+.FP  = %27		; user frame pointer
+.RP  = %28		; holds return address
+.SP  = %29		; user stack pointer
+XPC1 =	%30		; Saved PC at time of exception
+XPC2 =	%31		; Saved address of replaced instruction
+
+	.globl	main,usirq,sysiret
+	.enabl	dollar_hex
+SP	=	.SP
+S_USP	=	12		; offset to saved User Stack ptr
+S_PSL	=	8		; offset to saved Processor status
+S_PC1	=	4		; offset to saved first pc
+S_PC2	=	0		; offset to saved second pc
+SZ_ISF	=	16		; Size of interrupt stack frame
+IEN	=	16		; The I bit of the processor status word
+	.macro	NOP
+	ADD	%0,%0,0
+	.endm
+
+	.asect
+	.=	0
+RES_VCT::
+	BSR	.LP,10$
+	LD 	.LP,.LP[0]
+	.LONG	.LITPOOL.
+10$:	LDLIT	.SP, INIT_SP
+	ADD	XPC1,%0,.SP
+	BSR	.RP, main
+	ST	XPC1,ISP
+	.LONG	0
+
+	.=	$40
+ILL_VCT:
+	JSR	%0,XPC1[0]
+	JSR.C	%0,XPC2[0]
+	NOP
+	.=	$80
+SYS_VCT:
+	JSR	%0,XPC1[0]
+	JSR.C	%0,XPC2[0]
+	NOP
+	.=	$0C0
+; IRQ prologue, first save the software "user" stack pointer at a fixed address
+; in the first 256K, then get the software "interrupt" stack pointer and "push"
+; the two saved PCs, the PSL, and the user stack pointer
+IRQ_VCT:
+	ST	SP,USP
+	LD	SP,ISP
+	SUB	SP,SP,SZ_ISF
+	ST	SP,ISP
+	ST	XPC1,SP[S_PC1]
+	ST	XPC2,SP[S_PC2]
+	GETPS	XPC2
+	ST	XPC2,SP[S_PSL]
+	LD	XPC1,USP
+	ST	XPC1,SP[S_USP]
+; So much for prologue. At this point interrupts could be re-enabled (providing
+; we had disabled them externally by raising our "level"
+
+;	Useful code goes here..., call User's "irq" routine via BSR.
+; A user who is going to re-enable interrupts must either save XPC1 first
+; or return by jumping to sysiret.
+
+	BSR	XPC1,usirq
+	NOP
+sysiret::
+
+; Now back out again. If we had enabled interrupts, we need to disable them
+; again first. This would happen at the 2nd PUTPS below, because the I bit
+; would be clear in the stacked PSL, but XPC2 could be clobbered by an
+; unfortunately timed IRQ, so the first PUTPS is needed.
+	PUTPS	0
+	LD	XPC2,SP[S_PSL]		; Prepare to restore PSL
+	PUTPS	XPC2
+	ADD	XPC1,SP,0		; Save working stack ptr
+	ADD	SP,SP,SZ_ISF
+	ST	SP,ISP			; pre-pop ram copy of irq SP
+	LD	SP,XPC1[S_USP]		; Restore USP
+	LD	XPC2,XPC1[S_PC2]
+	LD	XPC1,XPC1[S_PC1]
+	JSR	%0,XPC1[0]
+	JSR.C	%0,XPC2[0]
+
+errno:: .long 0
+stdin::	.long 0
+stdout::.long 1
+stderr::.long 2
+
+END_OF_ASECT::
+
+	.psect	udata,seg=2,dat=2
+ISP:	.blkl	1
+USP:	.blkl	1
+
+	.psect data
+ctlchan::
+	.blkl 3
+
+	.include syscalls.mpp
+
+	.psect root
+exit::
+	SYSCALL SYSCALL_EXIT 	; return
+	BRA exit	; Illegal instruction will kill it
+	BRA exit
+
+fflush::
+	SYSCALL SYSCALL_FFLUSH	; %1 has pointer to FILEflush(FILE *). Probably does nothing
+
+	jsr %0,.RP[0]
+	NOP
+
+fgets::			; %1 has buffer pointer
+			; %2 has buffer length
+			; %3 has pointer to FILE
+	SYSCALL SYSCALL_FGETS
+	jsr %0,.RP[0]
+	NOP
+
+fputc::			; %1 has char to output
+			; %2 has pointer to FILE
+	SYSCALL SYSCALL_FPUTC
+	jsr %0,.RP[0]
+	NOP
+
+putchar::		; %1 has char to output
+			; %2 has pointer to FILE
+	SYSCALL SYSCALL_FPUTC
+	jsr %0,.RP[0]
+	NOP
+
+fputs::			; %1 has pointer to string
+			; %2 has pointer to FILE
+	SYSCALL SYSCALL_FPUTS
+	jsr %0,.RP[0]
+	NOP
+
+test::
+	SYSCALL %1	; Just testing the assembler
+	jsr %0,.RP[0]
+	NOP
+
+usirq::
+	SUB .SP,.SP,4
+	ST .RP,.SP[0]
+	SYSCALL 6
+	BRA exit
+	BRA exit

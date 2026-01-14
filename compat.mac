@@ -1,8 +1,72 @@
-	.globl begin
+.SP = %29
+.RP = %28.
+.FP = %27.
+.LP = %26
+	.globl begin,stack_top,termOut
+
+	.psect data
+stdin::
+	.long 0
+stdout::
+	.long 1
+stderr::
+	.long 2
+
 	.psect beg
-	bsr %26,10$
-	nop
+start::
+	bsr .LP,10$
+	LD .LP, .LP[0]
 	.long .LITPOOL.
-10$:	LD %26,%26[1]
-	BRA begin
+10$:	bra away
+	ADD .SP,%0,stack_top
+
+	. = start + 0x40
+trap0::	bra trap0
+	.long 0
+	. = start + 0x80
+trap1::	SUB .SP, .SP, 4*4
+	ST .RP, .SP[0]
+	ST %30, .SP[4]
+	ST %31, .SP[8]
+	ST %1,  .SP[12]
+	LD %1,  .SP[12]
+	LD %31, .SP[8]
+	LD %30, .SP[4]
+	LD .RP, .SP[0]
+	add .SP, .SP, 4*4
+	jsr.c %0, %30[0]
+	jsr.c %0, %31[0]
+	.long 0
+	.long 0
+away::
+	PUTPS 0x3F
+	GETPS %1
+	ADD %1,%2,3
+	ADD.C %4, %1, 4
+	SUB.C %1, %0, 4
+	AND %2, %1, 0xFF
+	AND.C %1, %2, 0xFF
+	AND.C %1, %0, 0
+	AND.C %0, .LP, 0xFF
+	BSR .RP, begin
 	NOP
+	SYSILL 1
+	nop
+	nop
+	ldlit %1, hello
+	sysill 2
+	.long 0	
+	.long 0	
+hello::	.asciz /Hello World!/
+
+	.psect stack
+	.long 0
+	.long 0
+termOut::
+	sysill 1
+
+;	.psect stack
+;stack_bottom::
+;	.blkl 32
+;stack_top::
+;	.long 0
