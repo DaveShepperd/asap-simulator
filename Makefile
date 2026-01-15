@@ -1,6 +1,7 @@
 LIB_BASE = /usr/local/asap-gca/cross_clib/
 CLIB = $(LIB_BASE)/crtl.lib
-CFLAGS = -I $(LIB_BASE)/include -I.
+OPT = -O
+CFLAGS = -I $(LIB_BASE)/include -I. $(OPT)
 CC = gca
 MACAS = macas
 MACPP = macpp
