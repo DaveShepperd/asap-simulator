@@ -200,10 +200,6 @@ static uint32_t getLSargs(Asap_t *asap, uint32_t instruction, int shiftCnt)
 					 ans, asap->memLen, asap->memLen + asap->stackSize);
 		}
 	}
-	else if ( ans > asap->memLen + asap->stackSize )
-	{
-		snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", ans, asap->memLen + asap->stackSize);
-	}
 	return ans;
 }
 
@@ -622,6 +618,7 @@ static int executeInstruction(Asap_t *asap)
 	asap->dstReg = (instruction>>22)&0x1F;
 	asap->src1Reg = (instruction>>16)&0x1F;
 	asap->src2 = (instruction&0xFFFF);
+	asap->bDst = 0;
 	asap->result = 0;
 	asap->affectStatus = (instruction&(1<<21)) ? true : false;
 	asap->errorMsg[0] = 0;
@@ -905,7 +902,15 @@ static int executeInstruction(Asap_t *asap)
 		asap->stsMask = NEGATIVE|ZERO;
 		memIdx = getLSargs(asap,instruction,2);
 		mkInstText(asap,instruction,"LD",4);
-		asap->bDst = *(uint32_t *)(asap->mem + memIdx);
+		if ( !asap->errorMsg[0] )
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->bDst = *(uint32_t *)(asap->mem + memIdx);
+		}
+		else
+			asap->bDst = 0;
 		asap->result = asap->bDst;
 		if ( commonLDIndOut(asap,memIdx,2) )
 			return 1;
@@ -914,7 +919,15 @@ static int executeInstruction(Asap_t *asap)
 		asap->stsMask = NEGATIVE|ZERO;
 		memIdx = getLSargs(asap,instruction,1);
 		mkInstText(asap,instruction,"LDS",2);
-		asap->bDst = *(int16_t *)(asap->mem + memIdx);
+		if ( !asap->errorMsg[0] )
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->bDst = *(uint16_t *)(asap->mem + memIdx);
+		}
+		if ( (asap->bDst&0x8000) )
+			asap->bDst |= 0xFFFF0000;
 		asap->result = asap->bDst;
 		if (commonLDIndOut(asap,memIdx,1))
 			return 1;
@@ -923,7 +936,13 @@ static int executeInstruction(Asap_t *asap)
 		asap->stsMask = NEGATIVE|ZERO;
 		memIdx = getLSargs(asap,instruction,1);
 		mkInstText(asap,instruction,"LDUS",2);
-		asap->bDst = *(uint16_t *)(asap->mem + memIdx);
+		if ( !asap->errorMsg[0] )
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->bDst = *(uint16_t *)(asap->mem + memIdx);
+		}
 		asap->result = asap->bDst;
 		if ( commonLDIndOut(asap,memIdx,1) )
 			return 1;
@@ -935,7 +954,12 @@ static int executeInstruction(Asap_t *asap)
 		asap->result = asap->registers[asap->dstReg];
 		asap->bDst = asap->result;
 		if ( !asap->errorMsg[0] )
-			*(uint16_t *)(asap->mem + memIdx) = asap->result;
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				*(uint16_t *)(asap->mem + memIdx) = asap->result;
+		}
 		if ( commonSTIndOut(asap,memIdx,1) )
 			return 1;
 		break;
@@ -946,7 +970,12 @@ static int executeInstruction(Asap_t *asap)
 		asap->result = asap->registers[asap->dstReg];
 		asap->bDst = asap->result;
 		if ( !asap->errorMsg[0] )
-			*(uint32_t *)(asap->mem + memIdx) = asap->result;
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				*(uint32_t *)(asap->mem + memIdx) = asap->result;
+		}
 		if (commonSTIndOut(asap,memIdx,2))
 			return 1;
 		break;
@@ -954,7 +983,15 @@ static int executeInstruction(Asap_t *asap)
 		asap->stsMask = NEGATIVE|ZERO;
 		memIdx = getLSargs(asap,instruction,0);
 		mkInstText(asap,instruction,"LDB",1);
-		asap->bDst = (int8_t)asap->mem[memIdx];
+		if ( !asap->errorMsg[0] )
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->bDst = (uint8_t)asap->mem[memIdx];
+		}
+		if ( (asap->bDst&0x80) )
+			asap->bDst |= 0xFFFFFF00;
 		asap->result = asap->bDst;
 		if (commonLDIndOut(asap,memIdx,0))
 			return 1;
@@ -963,7 +1000,13 @@ static int executeInstruction(Asap_t *asap)
 		asap->stsMask = NEGATIVE|ZERO;
 		memIdx = getLSargs(asap,instruction,0);
 		mkInstText(asap,instruction,"LDUB",1);
-		asap->bDst = asap->mem[memIdx];
+		if ( !asap->errorMsg[0] )
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->bDst = (uint8_t)asap->mem[memIdx];
+		}
 		asap->result = asap->bDst;
 		if (commonLDIndOut(asap,memIdx,0))
 			return 1;
@@ -975,7 +1018,12 @@ static int executeInstruction(Asap_t *asap)
 		asap->bDst = asap->registers[asap->dstReg]&0xFF;
 		asap->result = asap->bDst;
 		if ( !asap->errorMsg[0] )
-			asap->mem[memIdx] = asap->result;
+		{
+			if ( memIdx > asap->memLen + asap->stackSize )
+				snprintf(asap->errorMsg, sizeof(asap->errorMsg) - 1, "getLSargs(): memIdx %08X out of range of memory %08X\n", memIdx, asap->memLen + asap->stackSize);
+			else
+				asap->mem[memIdx] = asap->result;
+		}
 		if (commonSTIndOut(asap,memIdx,0))
 			return 1;
 		break;
