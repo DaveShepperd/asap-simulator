@@ -21,7 +21,7 @@
 #define NEGATIVE	(1<<3)
 #define IENABLE		(1<<4)
 #define PIENABLE	(1<<5)
-#define BSR_INC		(8)		/* Spec says this should be 4, but real code assumes 8 */
+#define BSR_INC		(8)		/* Spec says this should be 4, but some real code assumes 8 */
 
 static int chkBranch(Asap_t *asap)
 {
@@ -406,6 +406,25 @@ static int doSyscall(Asap_t *asap, int call)
 	int len, fno, sts;
 	char *strPtr;
 	
+	if ( asap->verbose )
+		printf("%s\n", asap->showText);
+	if ( asap->numHashes )
+	{
+		asap->showTextLen = snprintf(
+					asap->showText,
+					sizeof(asap->showText),
+					"%-*.*s                      ",
+					asap->longestName,
+					asap->longestName,
+					" ");
+	}
+	else
+	{
+		strncpy( asap->showText,
+				 "                     ",
+				 sizeof(asap->showText));
+		asap->showTextLen = strlen(asap->showText);
+	}
 	asap->showTextLen += snprintf(
 		asap->showText+asap->showTextLen,
 		sizeof(asap->showText)-asap->showTextLen,
@@ -428,23 +447,26 @@ static int doSyscall(Asap_t *asap, int call)
 				sizeof(asap->showText)-asap->showTextLen,
 				"fflush(%d).\n", fno);
 		}
-		fp = NULL;
-		if ( fno == 1 )
-			fp = stdout;
-		else if ( fno == 2 )
-			fp = stderr;
-		if ( fp )
-		{
-			sts = fflush(fp);
-			asap->registers[1] = sts;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = errno;
-		}
 		else
 		{
-			asap->registers[1] = -1;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = ENXIO;
+			fp = NULL;
+			if ( fno == 1 )
+				fp = stdout;
+			else if ( fno == 2 )
+				fp = stderr;
+			if ( fp )
+			{
+				sts = fflush(fp);
+				asap->registers[1] = sts;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = errno;
+			}
+			else
+			{
+				asap->registers[1] = -1;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = ENXIO;
+			}
 		}
 		asap->registers[1] = 0;
 		return 0;
@@ -456,25 +478,28 @@ static int doSyscall(Asap_t *asap, int call)
 			asap->showTextLen += snprintf(
 				asap->showText+asap->showTextLen,
 				sizeof(asap->showText)-asap->showTextLen,
-				"fputs(%s,%d).\n", strPtr, fno);
-		}
-		fp = NULL;
-		if ( fno == 1 )
-			fp = stdout;
-		else if ( fno == 2 )
-			fp = stderr;
-		if ( fp )
-		{
-			sts = fputs(strPtr, fp);
-			asap->registers[1] = sts;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = errno;
+				"fputs('%s',%d).\n", strPtr, fno);
 		}
 		else
 		{
-			asap->registers[1] = -1;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = ENXIO;
+			fp = NULL;
+			if ( fno == 1 )
+				fp = stdout;
+			else if ( fno == 2 )
+				fp = stderr;
+			if ( fp )
+			{
+				sts = fputs(strPtr, fp);
+				asap->registers[1] = sts;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = errno;
+			}
+			else
+			{
+				asap->registers[1] = -1;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = ENXIO;
+			}
 		}
 		return 0;
 	case SYSCALL_FGETS:
@@ -486,18 +511,18 @@ static int doSyscall(Asap_t *asap, int call)
 			asap->showTextLen += snprintf(
 				asap->showText+asap->showTextLen,
 				sizeof(asap->showText)-asap->showTextLen,
-				"fgets(%p,%d,%d).\n", strPtr, len, fno);
+				"fgets(%p,%d,%d). %s\n",
+				strPtr,
+				len,
+				fno,
+				fno ? "Not stdin. Ignored.":"Enter line of text:"
+				);
+			fputs(asap->showText,stdout);
+			asap->showText[0] = 0;
+			asap->showTextLen = 0;
 		}
 		if ( fno == 0 )
 		{
-			if ( asap->verbose && asap->showText[0] )
-			{
-				fputs(asap->showText,stdout);
-				if ( asap->showText[strlen(asap->showText)-1] != '\n' )
-					fputs("\n",stdout);
-				asap->showText[0] = 0;
-				asap->showTextLen = 0;
-			}
 			fflush(stdout);
 			if ( !fgets(strPtr,len,stdin) )
 			{
@@ -521,25 +546,32 @@ static int doSyscall(Asap_t *asap, int call)
 			asap->showTextLen += snprintf(
 				asap->showText+asap->showTextLen,
 				sizeof(asap->showText)-asap->showTextLen,
-				"fputc(%02X(%c),%d).\n", len, isprint(len)?len:'.', fno);
-		}
-		fp = NULL;
-		if ( fno == 1 )
-			fp = stdout;
-		else if ( fno == 2 )
-			fp = stderr;
-		if ( fp )
-		{
-			sts = fputc(len,fp);
-			asap->registers[1] = sts;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = errno;
+				"fputc(%02X(%c),%d)\n",
+				len,
+				isprint(len)?len:'.',
+				fno
+				);
 		}
 		else
 		{
-			asap->registers[1] = -1;
-			if ( asap->errnoPtr )
-				*asap->errnoPtr = ENXIO;
+			fp = NULL;
+			if ( fno == 1 )
+				fp = stdout;
+			else if ( fno == 2 )
+				fp = stderr;
+			if ( fp )
+			{
+				sts = fputc(len,fp);
+				asap->registers[1] = sts;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = errno;
+			}
+			else
+			{
+				asap->registers[1] = -1;
+				if ( asap->errnoPtr )
+					*asap->errnoPtr = ENXIO;
+			}
 		}
 		return 0;
 	case SYSCALL_FGETC:
@@ -549,7 +581,13 @@ static int doSyscall(Asap_t *asap, int call)
 			asap->showTextLen += snprintf(
 				asap->showText+asap->showTextLen,
 				sizeof(asap->showText)-asap->showTextLen,
-				"fgetc(%d).\n", fno);
+				"fgetc(%d). %s\n",
+				fno,
+				fno ? "Not stdin. Ignored.":"Enter a character:"
+				);
+		    fputs(asap->showText,stdout);
+			asap->showText[0] = 0;
+			asap->showTextLen = 0;
 		}
 		if ( fno == 0 )
 		{
@@ -578,7 +616,7 @@ static int executeInstruction(Asap_t *asap)
 	uint32_t *mem; 
 	const HashEntry_t *he;
 	
-	mem = (uint32_t *)(asap->mem+asap->pc);
+	mem = (uint32_t *)(asap->mem+asap->pcQue[0]);
 	instruction = *mem;
 	opcode = (instruction >> 27)&0x1F;
 	asap->dstReg = (instruction>>22)&0x1F;
@@ -591,7 +629,7 @@ static int executeInstruction(Asap_t *asap)
 	{
 		char header[36];
 		header[0] = 0;
-		he = findHash(asap,asap->pc);
+		he = findHash(asap,asap->pcQue[0]);
 		if ( he )
 			snprintf(header,sizeof(header),"%s:",he->name);
 		asap->showTextLen = snprintf(
@@ -601,7 +639,7 @@ static int executeInstruction(Asap_t *asap)
 					asap->longestName,
 					asap->longestName,
 					header,
-					asap->pc,
+					asap->pcQue[0],
 					instruction);
 	}
 	else
@@ -610,23 +648,25 @@ static int executeInstruction(Asap_t *asap)
 					asap->showText,
 					sizeof(asap->showText),
 					"%08X: %08X - ",
-					asap->pc,
+					asap->pcQue[0],
 					instruction);
-	}
-	if ( asap->brTarget )
-	{
-		asap->pc = asap->brTarget;
-		asap->brTarget = 0;
-		asap->pcInc = 0;
 	}
 	switch (opcode)
 	{
 	default:
 	case 0:
 	case 0x1F:
-		asap->registers[30] = asap->pc;
-		asap->registers[31] = asap->pc+4;
+		asap->registers[30] = asap->pcQue[0];
+		asap->registers[31] = asap->pcQue[1];
 		asap->status = ((asap->status&IENABLE)<<1) | (asap->status&0xF);
+		asap->showTextLen += snprintf(
+			asap->showText+asap->showTextLen,
+			sizeof(asap->showText)-asap->showTextLen,
+			"Illegal opcode. r30 <- %08X, r31 <- %08X, %s"
+			,asap->registers[30]
+			,asap->registers[31]
+			,mkStsTxt(asap,true)
+			);
 		src2 = (instruction&0xFFFF);
 		reg = 0;
 		if ( (src2 >= 0xFFE0) )
@@ -645,7 +685,7 @@ static int executeInstruction(Asap_t *asap)
 			asap->showTextLen += snprintf(
 				asap->showText+asap->showTextLen,
 				sizeof(asap->showText)-asap->showTextLen,
-				"Illegal opcode. Terminated.\n");
+				"Terminated.\n");
 			return 1;
 		}
 		if ( reg )
@@ -679,20 +719,20 @@ static int executeInstruction(Asap_t *asap)
 			   brOffset,
 			   instruction&0x3FFFFF,
 			   mkStsTxt(asap,asap->affectStatus),
-			   asap->pc+brOffset,
+			   asap->pcQue[0]+brOffset,
 			   condition ? " Taken":" Not taken");
 		if ( condition )
 		{
-			if ( (asap->pc + brOffset < 0 || asap->pc + brOffset > asap->memLen) )
+			if ( (asap->pcQue[0] + brOffset < 0 || asap->pcQue[0] + brOffset > asap->memLen) )
 			{
 				printf("%s\nWould have branched to %08X which is out of memory range %08X. Terminated.\n",
 					   asap->showText,
-					   asap->pc + brOffset, asap->memLen);
+					   asap->pcQue[0] + brOffset, asap->memLen);
 				asap->showText[0] = 0;
 				asap->showTextLen = 0;
 				return 1;
 			}
-			asap->brTarget = asap->pc+brOffset;
+			asap->pcQue[2] = asap->pcQue[0]+brOffset;
 		}
 		break;
 	case 2:
@@ -701,8 +741,8 @@ static int executeInstruction(Asap_t *asap)
 		if ( (brOffset&(1<<21)) )
 			brOffset |= 0xFFC00000;
 		brOffset *= 4;
-		asap->brTarget = asap->pc+brOffset;
-		he = findHash(asap,asap->brTarget);
+		asap->pcQue[2] = asap->pcQue[0]+brOffset;
+		he = findHash(asap,asap->pcQue[2]);
 		if ( asap->dstReg == 0 )
 		{
 			asap->showTextLen += snprintf(
@@ -711,7 +751,7 @@ static int executeInstruction(Asap_t *asap)
 				"BRA %+d (%06X) (branch to %08X)  %s\n",
 				brOffset,
 				instruction&0x3FFFFF,
-				asap->brTarget,
+				asap->pcQue[2],
 				he ? he->name:"");
 		}
 		else
@@ -723,16 +763,16 @@ static int executeInstruction(Asap_t *asap)
 				   mkRegName(asap,0,asap->dstReg),
 				   brOffset,
 				   instruction&0x3FFFFF,
-				   asap->pc + BSR_INC,
-				   asap->brTarget,
+				   asap->pcQue[0] + BSR_INC,
+				   asap->pcQue[2],
 				   he ? he->name : "");
-			asap->registers[asap->dstReg] = asap->pc+BSR_INC;
+			asap->registers[asap->dstReg] = asap->pcQue[0]+BSR_INC;
 		}
-		if ( (asap->pc+brOffset < 0 || asap->pc+brOffset > asap->memLen)  )
+		if ( (asap->pcQue[0]+brOffset < 0 || asap->pcQue[0]+brOffset > asap->memLen)  )
 		{
 			printf("%s\nWould have branched to %08X which is out of memory range %08X. Terminated.\n",
 				   asap->showText,
-				   asap->pc + brOffset, asap->memLen);
+				   asap->pcQue[0] + brOffset, asap->memLen);
 			asap->showText[0] = 0;
 			asap->showTextLen = 0;
 			return 1;
@@ -741,13 +781,15 @@ static int executeInstruction(Asap_t *asap)
 	case 3:
 		asap->stsMask = NEGATIVE|ZERO;
 		asap->result = getLSargs(asap,instruction,2);
+		asap->bDst = asap->result;
 		mkInstText(asap,instruction,"LEA",4);
 		if ( commonLDSOut(asap,2) )
 			return 1;
 		break;
 	case 4:
 		asap->stsMask = NEGATIVE|ZERO;
-		memIdx = getLSargs(asap,instruction,1);
+		asap->result = getLSargs(asap,instruction,1);
+		asap->bDst = asap->result;
 		mkInstText(asap,instruction,"LEAS",2);
 		if ( commonLDSOut(asap,1) )
 			return 1;
@@ -998,11 +1040,11 @@ static int executeInstruction(Asap_t *asap)
 		}
 		break;
 	case 0x1E:
-		memIdx = getLSargs(asap,instruction,0);
+		memIdx = getLSargs(asap,instruction,2);
 		mkInstText(asap,instruction,"JSR",4);
 		if ( asap->dstReg )
-			asap->registers[asap->dstReg] = asap->pc+BSR_INC;
-		asap->brTarget = memIdx;
+			asap->registers[asap->dstReg] = asap->pcQue[0]+BSR_INC;
+		asap->pcQue[2] = memIdx;
 		if ( asap->affectStatus )
 			asap->status = ((asap->status&PIENABLE)>>1) | (asap->status&0x2F);
 		he = findHash(asap,memIdx);
@@ -1010,7 +1052,7 @@ static int executeInstruction(Asap_t *asap)
 			asap->showText+asap->showTextLen,
 			sizeof(asap->showText)-asap->showTextLen,
 			"; dst gets %08X, jump to %08X%s  %s\n",
-			   asap->pc+BSR_INC,
+			   asap->pcQue[0]+BSR_INC,
 			   memIdx,
 			   mkStsTxt(asap,asap->affectStatus),
 			   he ? he->name : ""
@@ -1019,8 +1061,9 @@ static int executeInstruction(Asap_t *asap)
 			return 1;
 		break;
 	}
-	asap->pc += asap->pcInc;
-	asap->pcInc = 4;
+	asap->pcQue[0] = asap->pcQue[1];
+	asap->pcQue[1] = asap->pcQue[2];
+	asap->pcQue[2] = asap->pcQue[1]+4;
 	return 0;
 }
 
@@ -1030,7 +1073,13 @@ static void dumpRegs(Asap_t *asap)
 	const uint32_t *ptr;
 
 	ptr = asap->registers;
-	printf("pc = %08X%smemLen = %d, stackSize=%d.\n", asap->pc, mkStsTxt(asap,true), asap->memLen, asap->stackSize);
+	printf("pcs=%08X,%08X,%08X %smemLen=%d, stackSize=%d.\n",
+		   asap->pcQue[0],
+		   asap->pcQue[1],
+		   asap->pcQue[2],
+		   mkStsTxt(asap,true),
+		   asap->memLen,
+		   asap->stackSize);
 	for ( ii = 0; ii < 32; ++ii, ++ptr )
 	{
 		if ( !(ii & 7) )
@@ -1150,12 +1199,15 @@ typedef enum
 
 void simulateAsap(Asap_t *asap)
 {
-	asap->brTarget = 0;
-	asap->pcInc = 4;
+//	asap->brTarget = 0;
+//	asap->pcInc = 4;
 	Cmds_t lastCmd=Nothing;
 	uint32_t memFrom=0;
 	int memLen=0, args;
 	
+	asap->pcQue[0] = 0;
+	asap->pcQue[1] = 4;
+	asap->pcQue[2] = 8;
 	if ( !asap->interactive && asap->verbose )
 	{
 		printf("Before execution:\n");
@@ -1252,7 +1304,7 @@ void simulateAsap(Asap_t *asap)
 				lastCmd = Step;
 				if ( !asap->cannotContinue )
 				{
-					if ( asap->breakPointSet && asap->pc == asap->breakPoint )
+					if ( asap->breakPointSet && asap->pcQue[0] == asap->breakPoint )
 					{
 						const HashEntry_t *he = findHash(asap,asap->breakPoint);
 						printf("Hit breakpoint at %08X", asap->breakPoint);
@@ -1437,7 +1489,7 @@ void simulateAsap(Asap_t *asap)
 			fprintf(stderr,"Unrecognized command\n");
 			continue;
 		}
-		if ( asap->breakPointSet && asap->pc == asap->breakPoint )
+		if ( asap->breakPointSet && asap->pcQue[0] == asap->breakPoint )
 		{
 			const HashEntry_t *he = findHash(asap,asap->breakPoint);
 			printf("Hit breakpoint at %08X", asap->breakPoint);

@@ -1,5 +1,9 @@
 	.radix	10.
 ; Registers
+r0 = %0
+r1 = %1
+r2 = %2
+r3 = %3
 .LP  = %26		; user literal pool pointer
 .FP  = %27		; user frame pointer
 .RP  = %28		; holds return address
@@ -20,6 +24,9 @@ IEN	=	16		; The I bit of the processor status word
 	ADD	%0,%0,0
 	.endm
 
+	.psect bss
+	.psect bssend
+
 	.asect
 	.=	0
 RES_VCT::
@@ -28,7 +35,7 @@ RES_VCT::
 	.LONG	.LITPOOL.
 10$:	LDLIT	.SP, INIT_SP
 	ADD	XPC1,%0,.SP
-	BSR	.RP, main
+	BRA	clear_bss
 	ST	XPC1,ISP
 	.LONG	0
 
@@ -84,12 +91,27 @@ sysiret::
 	JSR	%0,XPC1[0]
 	JSR.C	%0,XPC2[0]
 
-errno:: .long 0
-stdin::	.long 0
-stdout::.long 1
-stderr::.long 2
+clear_bss::
+        LDLIT   r1, bss
+        LDLIT   r2, bssend
+        sub.c   r3, r2, r1
+20$:    ble     30$
+        nop
+        st      r0,r1[0]
+        add     r1,r1,4
+        bra     20$
+        sub.c   r3,r3,4
 
+30$:	bsr	.RP,main
+	nop
+
+40$:	.long 0		;trap to done
+	bra	40$
+	nop
 END_OF_ASECT::
+
+	.psect bss,seg=2,dat=2
+errno::
 
 	.psect	udata,seg=2,dat=2
 ISP:	.blkl	1
@@ -97,7 +119,10 @@ USP:	.blkl	1
 
 	.psect data
 ctlchan::
-	.blkl 3
+	.blkl	3
+stdin::	.long	0
+stdout::.long	1
+stderr::.long	2
 
 	.include syscalls.mpp
 

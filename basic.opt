@@ -1,4 +1,4 @@
 file( root.ol basic.ol );
 library(/usr/local/asap-gca/cross_clib/crtl.lib);
 declare( INIT_SP : 0xB000 );
-locate( root text .LITPOOL. udata data : END_OF_ASECT );
+locate( root text .LITPOOL. udata data bss bssend : END_OF_ASECT );

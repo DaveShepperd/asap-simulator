@@ -13,7 +13,7 @@ typedef struct HashEntry_t
 typedef struct
 {
 	uint32_t registers[32];
-	uint32_t pc;
+	uint32_t pcQue[3];
 	uint32_t status;
 	uint32_t memLen;
 	uint32_t breakPoint;
@@ -32,8 +32,8 @@ typedef struct
 	uint8_t stsMask;
 	int stackSize;
 	int verbose;
-	int pcInc;
-	int brTarget;
+//	int pcInc;
+//	int brTarget;
 	int *errnoPtr;
 	HashEntry_t *hashesPool;
 	int numUsedHashes;
