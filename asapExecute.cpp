@@ -794,7 +794,7 @@ static int executeInstruction(Asap_t *asap)
 	case 5:
 		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
 		getALUargs(asap);
-		asap->bSrc1 = ((~asap->bSrc1)&0xFFFFFFFF) + 1;	/* 2's compliment lower 32 bits */
+		asap->bSrc1 = ((~asap->bSrc1)&0xFFFFFFFF) + 1;	/* 1's compliment lower 32 bits + imagined set carry in bit */
 		asap->bDst = asap->bSrc2+asap->bSrc1; /* so overflow and carry bit set properly */
 		if ( asap->affectStatus )
 			setStatus(asap,2);
@@ -857,7 +857,7 @@ static int executeInstruction(Asap_t *asap)
 	case 9:
 		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
 		getALUargs(asap);
-		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+1; /* 2's compliment lower 32 bits so overflow and carry work */
+		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+1; /* 1's compliment lower 32 bits + imagined set carry in */
 		asap->bDst = asap->bSrc1+asap->bSrc2;
 		commonAluOut(asap,"SUB","-");
 		break;
@@ -870,7 +870,7 @@ static int executeInstruction(Asap_t *asap)
 	case 0x0B:
 		asap->stsMask = CARRY|OVERFLOW|NEGATIVE|ZERO;
 		getALUargs(asap);
-		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+1+(asap->status&CARRY); /* so overflow check works */
+		asap->bSrc2 = ((~asap->bSrc2)&0xFFFFFFFF)+(asap->status&CARRY); /* 1's compliment lower 32 bits + carry bit from PS */
 		asap->bDst = asap->bSrc1+asap->bSrc2;
 		commonAluOut(asap,"SUBC","-");
 		break;
