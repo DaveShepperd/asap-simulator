@@ -1,0 +1,384 @@
+
+	I hacked this short description from the fifty-or-so page
+document that is an "attachment" to the contract between Atari Games
+and ITD (the people doing the chip level design). The chip itself is
+currently (early FEB, 1989) in gate-level simulation. It arose from
+our frustration at attempting to shoe-horn "modern" microprocessors
+into the "embedded systems" we build. While "embedded systems" is a
+popular phrase right now, most processors being offered in this market
+interpret it to mean "not tied to an established architecture, so we
+can sell our snazzy new incompatable chip". While this is usually
+true, it is a small part of the story. In my mind, it also includes:
+
+   Able to support C, but not pandering to it.
+	By this I mean, not so dedicated to C that any other language is
+	a major pain.
+   Reasonable to program in assembly (clean and regular)
+	Like it or not, there will probably always be some assembly in
+	time and cost critical applications. Also, embedded systems often
+	have far different programming-cost/unit-cost criteria.
+   Highly observable, without performance degradation.
+	Almost all "modern" microprocessors are nearly impossible to debug
+	in real-time applications, unless you turn off the features that
+	made them fast enough to use in the first place.
+   As little as possible "knowledge" of software "embedded" in chip.
+	This is related to the first item. For example, if I want to program
+	in PASCAL, I want resonable support for a "display" (static chain
+	cache). If not, I want those registers back for general use.
+   As little waste of memory cycle time as possible.
+	The 680x0 family is notorious for this. memory which is fast enough
+	to avoid wait states spends fully half its time waiting for the
+	processor to figure out what it's doing next.
+   multiply sourced, which generally translates to-
+   Cheap. (not inconsiderable, but not the highest priority).
+
+	I make no claims that the resulting chip is "perfect". I have some
+qualms about some of the compromises I made, but any designer who doesn't
+is IMHO, just not looking critically at his baby. In general, I think we
+did our job. Please let me know if I cut too much (or included too much,
+as you are the first to recieve this note.
+
+	The question of what technique to use to keep this beast fed at
+20 MHz is left to the actual user. Many applications will simply run it at
+4 MHz with the same 200 nS ROMS that can only sustain about 1 MIP on a vanilla
+68000. Others might include a small bipolar ROM for frequently used routines.
+Still others may, indeed, use a cache constructed from merchant parts. The whole
+idea was to let the actual user decide what best fit the actual use.
+
+	I am well aware that this machine may trigger a gag-reflex in those
+accustomed to a much higher level of support for the traditional C/Unix (tm)
+environment. So be it, as it was not designed for such an environment, and in
+fact was designed in reaction to the difficulty of using "better" machines
+to control video games.
+
+So, the brief tour:
+
+Overview:
+---------
+ASAP is a fast, simple 32-bit processor inspired by the fad for RISC computer
+architecture (and the real needs this fad addresses). Some of the "features"
+of this simple processor are:
+	1. There are only 30 basic opcodes.
+	2. All instructions are 32 bits wide.
+	3. All instructions execute in one or two cycles.
+	4. There are only two instruction formats.
+	5. Memory is only accessed with LD and ST instructions.
+	6. Only six addressing modes. (really only two)
+	7. No instruction accesses more than one data location.
+	8. Condition code updating is selectable.
+	9. Unaligned data is not directly supported.
+	10. Only one level of interrupts is supported.
+	11. No direct virtual memory support. (but neither do we prevent it)
+	12. No supervisor or non-user mode.
+	13. BCD arithmetic is not supported.
+
+Programming Model:
+------------------
+The programmer has available:
+	31 general purpose 32-bit registers (R1-R31)
+	 a 32-bit program counter (PC)
+	 a 32-bit process status register (PS)
+Two of the 31 general purpose registers (R30 and R31) are used by the exception
+handling mechanism, so in most cases only 29 are available to the programmer.
+These are all equivalent and can be used for data, pointers, indices, etc.
+R0 is hardwired to all zeroes. This is used to generate derived instructions
+such as MOV, INC, TST, and JMP, as well as some addressing modes. The two LSBs
+of the PC are also hardwired to zero since all instructions are aligned words.
+
+Data is byte addressable and lo-endian, i.e. a low order address is the low
+order byte of a halfword or word.  All registers are treated as words.  Byte
+and halfword data from memory are sign- or zero-extended before loading into
+a register and only the lower order bits are transfered during a byte or half-
+word store.  Although the ASAP architecture supports 32 address bits (4 GBytes),
+this processor has pins for address bits 2 thru 31.  Address bits 0 and 1 are
+not necessary since the data bus is 4 bytes wide.  Byte and halfword operations
+are indicated by four separate data strobes.
+
+The status bits in the PS are arranged in the following:
+
+	 3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
+	 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+	|0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0|P I N Z V C|
+
+	P	Previous state of I (save during exception processing)
+	I	Interrupt Enable
+	N	Negative
+	Z	Zero
+	V	Overflow
+	C	Carry
+
+Five data types are supported.  These are:
+	Words (32 bits)
+	Signed halfwords (16 bits)
+	Unsigned halfwords (16 bits)
+	Signed bytes (8 bits)
+	Unsigned bytes (8 bits)
+
+The six addressing modes are:
+	Register Direct
+	Quick Immediate
+	Relative
+	Register Indirect with Index
+	Register Indirect with Offset
+	Absolute
+
+Register Direct - The operand is in the register specified in the instruction.
+Quick Immediate - The operand is the low order 16 bits of the instruction zero-
+	extended to 32 bits.
+Relative - This mode only applies to "Branch" instructions (BSR and Bcc).
+	The effective address is computed by sign-extending the lower 22
+	bits of the instruction, shifting this value left two bits (forming
+	a word index) and adding LPC, which holds the address of the branch
+	instruction itself. Thus an offset of zero yields an effective address
+	of the branch instruction.
+Register Indirect with Index - The address of the operand is the sum of the Base
+	Register and the Index Register shifted left according to the data 
+	type (once for halfwords and twice for words).
+Register Indirect with Offset - The address of the operand is the sum of the
+	Base Register and the low order 16 bits of the instruction zero-
+	extended to 32 bits and shifted left according to the data type (once
+	for halfwords and twice for words).
+Absolute - The degenerate form of Register Indirect with Offset, where the Base
+	Register is R0. The address of the operand is developed by shifting the
+	low order 16 bits of the instruction up (left) zero, one, or two bits
+	(depending on data size) and then zero-extending to 32 bits.
+
+
+Arithmetic:
+----------
+All arithmetic is done in 32 bit two's complement with a latched carry. That is,
+the carry out of the ALU is used to set the C bit of the PS (if enabled) and the
+carry in to the ALU is provided by the C bit (for ADDC and SUBC).  This is in
+contrast to such machines as the PDP-11 and 680x0, which toggle (rather than
+setting) the C bit and invert the carry in if the operation is a subtract.  The
+advantage to the other scheme is that "carry" means something extraordinary,
+while in the latched scheme the PS control need never conditionally invert the
+carry.  The latched carry is also the same for (a-b) and (-b+a).
+
+Carry in to the ALU is as follows:
+
+ADD	Cleared
+ADDC	From C bit of PS
+SUB	Set
+SUBC	From C bit of PS
+SUBR	Set
+
+In all subtracts, the subtrahend (src2 except in the case of SUBR) is one's
+complemented (bit-wise inverted) and added (along with carry per above) to the
+minuend.
+
+The V bit is set if a carry into the MSB of the ALU is not accompanied by a
+carry out.
+
+In the instruction descriptions below, the following symbols are used for
+logical operations:
+
+	'&'	bit-wise "AND"
+	'|'	bit-wise "OR"
+	'^'	bit-wise "Exclusive OR"
+	'~'	bit-wise inversion (one's complement)
+	'=='	relation of equality
+	'!='	relation of inequality
+	'->'	assignment ( a -> b reads "b gets a")
+
+
+Instructions:
+-------------
+ASAP has only three opcode types; ALU, LD/ST, and BR.  All three instruction
+types are similarly pipelined.  ASAP has only two basic instruction formats.  
+They are:
+	 3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
+	 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+	| Opcode  |  Rdst   |*|  Rsrc1  |             src2              |
+	| Opcode  |  CC/Rpc |                Offset                     |
+
+where the bit marked '*' is the condition_code control. If this bit is
+zero, the condition codes will be unaffected by most instructions. If this
+bit is one, the condition code modification described for an instruction will
+take place. Note that the action of ILLOP, SYSILL, and PUTPS are not affected
+by this bit (always change condition codes).
+
+	The assembler syntax is to append ".C" to the mnemonic of any
+instruction which is to have this bit set.
+
+	Rdst and Rsrc1 are always registers. src2 is a 16-bit immediate
+value, which is padded on the left with zeroes, unless it is >= 0xFFE0,
+in which case the 5 lsbs specify a register. (I readily admit this is a
+kluge, but it was chosen in preference to the more common scheme where
+a whole bit is used to distinguish the two cases. The only place where this
+hurts much is the inability to zero-extend a halfword in a register in one
+instruction. Ordinarily this should not be a problem, but it does show up
+with annoying frequency in C code originally written for the 68000, where
+a lot of register short variables are declared that should have been int,
+but for the 68000's poor handling of 32-bit data.)
+
+	Memory addresses are formed by scaling src2 (refered to as index)
+appropriately for the data size and adding rsrc1 (refered to as base).
+
+The section describing each opcode in detail has been severely editted, to
+save space.
+ADD:	Rsrc1 + src2 -> Rdst
+ADDC:	Rsrc1 + src2 + C -> Rdst
+AND:	Rsrc1 & src2 -> Rdst
+ANDN:	Rsrc1 & ~src2 -> Rdst
+ASHL:	Rsrc1 arithmetically shifted left by src2 -> Rdst
+	This is called "aritmetic" because overflow is handled correctly.
+ASHR:	Rsrc1 arithmetically shifted right by src2 -> Rdst
+Bcc:	If condition is true then LPC + offset -> PC
+	This is a "delayed branch", so the following instruction is executed.
+	An offset of zero results in a branch back to the branch
+	instruction. If the instruction after the branch can change
+	the condition codes, this may be a useful construct
+	The possible conditions are:
+	SP	Strictly Positive	 (N | Z) == 0
+	MZ	Minus or Zero		 (N | Z) == 1
+	GT	Greater than 	   ((N ^ V) | Z) == 0
+	LE	Less than or equal ((N ^ V) | Z) == 1
+	GE	Greater than or equal    (N ^ V) == 0
+	LT	Less than		 (N ^ V) == 1
+	HI	Higher than		(~C | Z) == 0
+	LS	Lower than or same	(~C | Z) == 1
+	CC	Carry Clear		      C  == 0
+	CS	Carry Set		      C  == 1
+	PL	Plus			      N  == 0
+	MI	Minus			      N  == 1
+	NE	Not equal		      Z  == 0
+	EQ	Equal			      Z  == 1
+	VC	Overflow clear		      V  == 0
+	VS	Overflow set		      V  == 1
+	The assembler will accept the condition HS (higher or same)
+	as an alias for CS, likewise LO (lower than) for CC.
+	Also, BRA will be accepted and generate BSR R0,address.
+BSR:	PC + 8 -> Rpc, LPC + offset -> PC
+	Note that this is a "branch and link register", not the more common
+	"push PC and branch". There is no hardware stack. On the other hand,
+	"leaf" routines need not do any stack references. It is also a delayed
+	branch.
+GETPS:	PS -> Rdst
+JSR:	PC + 8 -> Rpc, Rbase + 4*index -> PC
+	In other words, like BSR, except same addressing as LOAD/STORE.
+	JSR.C will set the I bit in PS will be from the P bit, possibly
+	re-enabling interrupts.
+LD:	Word @ Memory(Rbase+4*index) -> Rdst
+	Unaligned fetches are allowed, but do no get the whole word. What they
+	do get is right-justified with zero-fill
+LDB:	Signed Byte @ Memory(Rbase+index) -> Rdst
+LDUB:	Unsigned Byte @ Memory(Rbase+index) -> Rdst
+LDH:	Signed Halfword @ Memory(Rbase+2*index) -> Rdst
+LDUH:	Unsigned Halfword @ Memory(Rbase+2*index) -> Rdst
+LEA:	Rbase + 4*index -> Rdst
+	While intended for "load effective address", this can be used, for
+	example, to multiply by 5. The condition codes are set properly so that
+	languages that check for overflow can still us it.
+LEAH:	Rbase + 2*index -> Rdst
+LSHR:	Rsrc1 logically shifted right by src2 -> Rdst
+OR:	Rsrc1 | src2 -> Rdst
+ORN:	Rsrc1 | ~src2 -> Rdst
+PUTPS:	src2 -> PS
+ROTL:	Rsrc1 rotated left by src2 -> Rdst
+	Alone among the shifts, this chops the count modulo 32 and does not
+	affect carry.
+ST:	Rsrc -> word @ Memory(Rbase+4*index)
+	Similar "semi-support" for unaligned store. The LSB of the register
+	is stored at the effective address, followed by as many more bytes
+	as fit.
+STB:	Rsrc -> Byte @ Memory(Rbase+index)
+STH:	Rsrc -> Halfword @ Memory(Rbase+2*index)
+SUB:	Rsrc1 - src2 -> Rdst
+SUBC:	Rsrc1 + ~src2 + C -> Rdst
+SUBR:	src2 - Rsrc1 -> Rdst
+XOR:	Rsrc1 ^ src2 -> Rdst
+XORN:	Rsrc1 ^ ~src2 -> Rdst
+
+Reset, Traps, and Interrupts:
+-----------
+    Hardware reset is initiated if the /RESET pin of the processor is
+asserted at the rising edge of the processor clock. Reset processing consists
+solely of clearing the I bit of the processor status (PS) and jumping to
+address 0. No other change to processor state is made. In particular any
+write of results from the cycle just ended, to registers or PS, is suppressed.
+This means that the state of the processor (other than the I bit and PC ) is
+as it was before the previous instruction was executed.
+	(This means that with a little extra external hardware, RESET can be
+used as a sort of NMI, for handling page-faults or emulator-induced breakpoints)
+
+    An interrupt is initiated at the rising edge of the processor clock if:
+	The I bit of the PS is 1.
+	The /IRQ pin of the processor is asserted.
+	The /RESET pin of the processor is not asserted.
+	An instruction is being fetched (OP is asserted).
+Interrupt processing is described below.
+
+    An Illegal Instruction Trap is initiated when an attempt is made to
+execute an instruction word with the binary opcode 00000 or 11111. RESET and
+IRQ effectively replace any opcode being fetched at the time they occur. Thus
+any illegal instruction being fetched coincidentally will not cause a trap until
+(and unless) a return from exception is made and the instruction is re-fetched.
+
+    Interrupts and Illegal Instruction Trap exceptions are handled similarly.
+In the first cycle LPC (the address being fetched when the interrupt occurred,
+or the address of the illegal instruction) is stored in R30, the I bit of the PS
+is copied to the P bit, XACK is asserted, and the I bit is cleared. In the
+second cycle, the PC (pointing to the instruction that would have been fetched
+during the first cycle) is stored in R31, XACK is removed, OP is asserted, and
+the instruction at the appropriate "vector" is fetched. Execution proceeds with
+this instruction. The "vectors" are as follows: 
+
+    Trap (opcode 00000):	00000040
+    Trap (opcode 11111):	00000080
+    Interrupt:			000000C0
+
+Any program using interrupts or traps must refrain from relying on the contents
+of R30 and R31, thus reducing the effective number of general registers to 29.
+
+    A return from exception can be made with the sequence:
+
+	JSR.C	R0,R30[0]	Restore I bit from P and "execute" @R30
+	JSR	R0,R31[0]	Jump @R31
+
+    Placing the ".C" on the second JSR instead will guarantee at least one
+mainline instruction will be executed before re-entering the interrupt
+routine, even if /IRQ is still asserted.
+
+AC Electrical Characteristics:
+(VDD = 4.5 to 5.5V, TA = 0 to 70'C)
++-----------------------+-------+---------------+-------+-------+-------+
+| Parameter		| Symbol| Conditions	|  Min	|  Max	| Units	|
++-----------------------+-------+---------------+-------+-------+-------+
+| CLK CYCLE		| TCYC	|		|   50	| 99999	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| CLK LOW		| TCL	|		|   20	| 99000	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| CLK HIGH		| TCH	|		|   20	| 99000	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| CLK RISE		| TCR	| TCYC < 100ns	|	|    5	|   ns	|
+| 			| 	| TCYC > 100ns	|	|   10	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| CLK FALL		| TCF	| TCYC < 100ns	|	|    5	|   ns	|
+| 			| 	| TCYC > 100ns	|	|   10	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| ADDRESS VALID		| TADV	| CL = 20pF	|	|   10	|   ns	|
+| 			| 	| CL = 50pF	|	|   15	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| ADDRESS HOLD		| TADH	|		|    3	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| OPCODE SETUP		| TOPS	|		|   10	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| OPCODE HOLD		| TOPH	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| READ DATA SETUP	| TRDS	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| READ DATA HOLD	| TRDH	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| WRITE DATA VALID	| TWDV	| CL = 50 pF	|	|   35	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| WRITE DATA HOLD	| TWDH	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| STATUS OUT VALID	| TSTV	| CL = 20 pF	|	|   20	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| STATUS OUT HOLD	| TSTH	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| EXCEPTION SETUP	| TEXS	|		|   20	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
+| EXCEPTION HOLD	| TEXH	|		|    5	|	|   ns	|
++-----------------------+-------+---------------+-------+-------+-------+
