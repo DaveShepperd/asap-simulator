@@ -1,5 +1,5 @@
-	.list	
-	.macro call name, value
+; MIT license. See LICENSE.md for details.	
+.macro call name, value
 	.outfile 0
 	.globl name
 name = value

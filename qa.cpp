@@ -1,3 +1,4 @@
+/* MIT license. See LICENSE.md for details */
 /* QA.C -- Question & Answer routine for stdout and stdin */
 
 #include "lclreadline.h"

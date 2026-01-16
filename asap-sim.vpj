@@ -275,10 +275,10 @@
 			Filters="*.c;*.C;*.cc;*.cpp;*.cp;*.cxx;*.c++;*.prg;*.pas;*.dpr;*.asm;*.s;*.bas;*.java;*.cs;*.sc;*.scala;*.e;*.cob;*.html;*.rc;*.tcl;*.py;*.pl;*.d;*.m;*.mm;*.go;*.groovy;*.gsh"
 			GUID="{86EC3DA7-D08A-41F3-ACC6-323E6AFD279D}">
 			<F N="asapExecute.cpp"/>
-			<F N="get_stb.c"/>
-			<F N="lclreadline.c"/>
+			<F N="get_stb.cpp"/>
+			<F N="lclreadline.cpp"/>
 			<F N="main.cpp"/>
-			<F N="qa.c"/>
+			<F N="qa.cpp"/>
 		</Folder>
 		<Folder
 			Name="Header Files"

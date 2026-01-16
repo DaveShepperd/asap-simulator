@@ -1,3 +1,5 @@
+/* MIT license. See LICENSE.md for details */
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>

@@ -1,3 +1,4 @@
+; MIT license. See LICENSE.md for details
 	.radix	10.
 ; Registers
 r0 = %0
@@ -111,9 +112,9 @@ clear_bss::
 END_OF_ASECT::
 
 	.psect bss,seg=2,dat=2
-errno::
 
 	.psect	udata,seg=2,dat=2
+errno::	.blkl	1
 ISP:	.blkl	1
 USP:	.blkl	1
 

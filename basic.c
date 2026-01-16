@@ -1,3 +1,5 @@
+/* MIT license. See LICENSE.md for details */
+
 /*
  * Minimal BASIC Interpreter for Embedded Systems
  * Features: PRINT, LET, INPUT, GOTO, END, REM

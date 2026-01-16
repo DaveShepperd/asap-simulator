@@ -22,7 +22,7 @@ typedef struct
 	uint8_t *stbFileContents;
 	char errorMsg[128];
 	char showText[128];
-	char regName[3][8];
+	char regName[3][16];
 	int showTextLen;
 	char stsTxt[16];
 	int dstReg, src1Reg, src2;

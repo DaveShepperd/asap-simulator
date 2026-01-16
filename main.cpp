@@ -18,10 +18,12 @@ static int help_em(const char *us)
 {
 	fprintf(stderr,"Usage: %s [-hiv] [-e ptr] path-to-image\n"
 			"Where:\n"
-			"-e ptr - place in sim memory where errno is located. Defaults to 0x11C\n"
-			"-h     - this message\n"
-			"-i     - set interactive mode\n"
-			"-v     - increase verbosity\n"
+			"-e ptr  - place in sim memory where errno is located. Defaults to 0x1BC\n"
+			"-h      - this message\n"
+			"-i      - set interactive mode\n"
+			"-s      - set stack size (default 32768)"
+			"-S path - point to .stb file to get symbols\n"
+			"-v      - increase verbosity\n"
 			,us);
 	return 1;
 }
@@ -34,7 +36,7 @@ int main(int argc, char *argv[])
 	const char *imageName;
 	char *endp;
 	
-	while ( (opt = getopt(argc, argv, "his:S:v")) != -1 )
+	while ( (opt = getopt(argc, argv, "e:his:S:v")) != -1 )
 	{
 		switch (opt)
 		{
@@ -116,7 +118,7 @@ int main(int argc, char *argv[])
 			return 1;
 	}
 	if ( !errnoPtrSet && !errnoPtr )
-		errnoPtr = 0x11C;
+		errnoPtr = 0x1BC;
 	if ( errnoPtr >= asap.memLen )
 	{
 		if ( errnoPtr >= asap.memLen + asap.stackSize )

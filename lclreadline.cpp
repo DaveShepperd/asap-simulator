@@ -1,3 +1,4 @@
+/* MIT license. See LICENSE.md for details */
 /* lclreadline.c - interface to glib's readline() function */
 #include <stdio.h>
 #include <stdlib.h>
